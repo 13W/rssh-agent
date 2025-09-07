@@ -106,24 +106,53 @@ fn parse_add_identity_common(
     let key_type = wire::read_string(data, offset)?;
     let key_type_str = std::str::from_utf8(&key_type).ok()?;
 
-    let private_key = match key_type_str {
+    // Read the key components based on key type
+    // We'll store all the components together to reconstruct later
+    let mut key_components = Vec::new();
+
+    match key_type_str {
         "ssh-ed25519" => {
-            let _pub_key = wire::read_string(data, offset)?;
+            // Ed25519: public key (32 bytes) + private key (64 bytes)
+            let pub_key = wire::read_string(data, offset)?;
             let priv_key = wire::read_string(data, offset)?;
-            priv_key
+
+            // Store the key type and components with proper length prefixes
+            key_components.extend_from_slice(&(key_type.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&key_type);
+            key_components.extend_from_slice(&(pub_key.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&pub_key);
+            key_components.extend_from_slice(&(priv_key.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&priv_key);
         }
         "ssh-rsa" => {
-            let _n = wire::read_string(data, offset)?;
-            let _e = wire::read_string(data, offset)?;
-            let _d = wire::read_string(data, offset)?;
-            let _iqmp = wire::read_string(data, offset)?;
-            let _p = wire::read_string(data, offset)?;
-            let _q = wire::read_string(data, offset)?;
-            // For now, just store a placeholder
-            vec![]
+            // RSA: n, e, d, iqmp, p, q
+            let n = wire::read_string(data, offset)?;
+            let e = wire::read_string(data, offset)?;
+            let d = wire::read_string(data, offset)?;
+            let iqmp = wire::read_string(data, offset)?;
+            let p = wire::read_string(data, offset)?;
+            let q = wire::read_string(data, offset)?;
+
+            // Store all RSA components with proper length prefixes
+            key_components.extend_from_slice(&(key_type.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&key_type);
+            key_components.extend_from_slice(&(n.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&n);
+            key_components.extend_from_slice(&(e.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&e);
+            key_components.extend_from_slice(&(d.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&d);
+            key_components.extend_from_slice(&(iqmp.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&iqmp);
+            key_components.extend_from_slice(&(p.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&p);
+            key_components.extend_from_slice(&(q.len() as u32).to_be_bytes());
+            key_components.extend_from_slice(&q);
         }
         _ => return None,
     };
+
+    let private_key = key_components;
 
     let comment = wire::read_string(data, offset)?;
     let comment_str = String::from_utf8_lossy(&comment).into_owned();

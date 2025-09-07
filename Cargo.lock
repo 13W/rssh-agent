@@ -1603,12 +1603,14 @@ name = "rssh-daemon"
 version = "0.1.0"
 dependencies = [
  "atty",
+ "hex",
  "libc",
  "nix",
  "rand",
  "rpassword",
  "rssh-core",
  "rssh-proto",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",

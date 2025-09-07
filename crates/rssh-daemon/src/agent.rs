@@ -77,13 +77,31 @@ impl Agent {
             Err(_) => return Ok(messages::build_failure()),
         };
 
-        let identities: Vec<messages::Identity> = keys
-            .into_iter()
-            .map(|key| messages::Identity {
-                public_key: vec![], // TODO: Get actual public key
-                comment: key.description,
-            })
-            .collect();
+        // Get public keys for each loaded key
+        let mut identities = Vec::new();
+        for key_info in keys {
+            // We need to get the actual public key data
+            // For now, we'll need to decrypt and parse the key
+            match self.ram_store.with_key(&key_info.fingerprint, |key_data| {
+                use crate::key_utils;
+                key_utils::get_public_key_blob(key_data).map_err(|e| rssh_core::Error::Internal(e))
+            }) {
+                Ok(public_key_blob) => {
+                    identities.push(messages::Identity {
+                        public_key: public_key_blob,
+                        comment: key_info.description,
+                    });
+                }
+                Err(e) => {
+                    // Skip keys we can't process
+                    tracing::warn!(
+                        "Failed to get public key for fingerprint {}: {}",
+                        key_info.fingerprint,
+                        e
+                    );
+                }
+            }
+        }
 
         Ok(messages::build_identities_answer(&identities))
     }
@@ -108,12 +126,35 @@ impl Agent {
             Some(id) => id,
             None => return Ok(messages::build_failure()),
         };
+        // Parse the wire format key to get fingerprint and key type
+        use crate::key_utils;
 
-        tracing::debug!("Add identity: {} ({})", identity.comment, identity.key_type);
+        let (fingerprint, key_type, _pub_key_blob) =
+            match key_utils::parse_wire_key(&identity.private_key_data) {
+                Ok(info) => info,
+                Err(e) => {
+                    tracing::warn!("Failed to parse key: {}", e);
+                    return Ok(messages::build_failure());
+                }
+            };
 
-        // TODO: Parse the key and add to RAM store
-
-        Ok(messages::build_success())
+        // Add to RAM store
+        match self.ram_store.load_key(
+            &fingerprint,
+            &identity.private_key_data,
+            identity.comment,
+            key_type,
+            false, // has_cert
+        ) {
+            Ok(_) => {
+                tracing::info!("Added key with fingerprint: {}", fingerprint);
+                return Ok(messages::build_success());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to add key: {}", e);
+                return Ok(messages::build_failure());
+            }
+        }
     }
 
     async fn handle_add_id_constrained(&self, message: &[u8]) -> Result<Vec<u8>> {
