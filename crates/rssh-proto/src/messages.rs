@@ -1,6 +1,4 @@
 use crate::wire::{self, Constraint, MessageType};
-use ssh_key::{Algorithm, PublicKey, Signature};
-use std::time::Duration;
 
 /// Identity information for REQUEST_IDENTITIES response
 #[derive(Debug, Clone)]

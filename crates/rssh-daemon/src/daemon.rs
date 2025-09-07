@@ -1,9 +1,9 @@
 use crate::{agent::Agent, socket::SocketServer};
-use nix::sys::signal::{Signal, kill};
+
 use nix::unistd::{ForkResult, fork, setsid};
 use rssh_core::{Error, Result};
 use std::io::{self, Write};
-use std::process;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::signal::unix::{SignalKind, signal};

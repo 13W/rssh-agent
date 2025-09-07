@@ -1,6 +1,6 @@
 use rssh_core::{Error, Result};
 use rssh_daemon::prompt::{PrompterDecision, SecureString};
-use rssh_proto::{messages, wire};
+use rssh_proto::wire;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;

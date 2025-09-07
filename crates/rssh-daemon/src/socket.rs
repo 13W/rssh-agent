@@ -2,7 +2,7 @@ use crate::agent::Agent;
 use nix::sys::socket::{getsockopt, sockopt};
 use nix::unistd::{Gid, Uid};
 use rssh_core::{Error, Result};
-use rssh_proto::wire;
+
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -98,7 +98,7 @@ impl SocketServer {
                 if let Err(e) = handle_client(stream, agent).await {
                     tracing::error!("Client handler error: {}", e);
                 }
-                client_count - 1;
+                client_count -= 1;
             });
         }
     }
@@ -195,8 +195,6 @@ struct PeerCredentials {
 
 /// Get peer credentials from a Unix socket
 fn get_peer_credentials(stream: &UnixStream) -> Result<PeerCredentials> {
-    use std::os::unix::io::AsFd;
-
     // On Linux, use SO_PEERCRED
     #[cfg(target_os = "linux")]
     {

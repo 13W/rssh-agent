@@ -1,4 +1,4 @@
-use rssh_core::{Error, Result, ram_store::RamStore};
+use rssh_core::{Result, ram_store::RamStore};
 use rssh_proto::{messages, wire};
 use std::sync::Arc;
 use tokio::sync::RwLock;

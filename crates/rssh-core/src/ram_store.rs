@@ -1,6 +1,6 @@
 use crate::{Error, Result};
 use argon2::{Argon2, Params, Version};
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, OsRng},
