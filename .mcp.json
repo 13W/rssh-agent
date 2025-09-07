@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "rust-mcp": {
+      "type": "stdio",
+      "command": "mcp-language-server",
+      "args": [
+        "--lsp",
+        "rust-analyzer",
+        "--workspace",
+        "/opt/rust/rssh-agent"
+      ],
+      "env": {}
+    }
+  }
+}
