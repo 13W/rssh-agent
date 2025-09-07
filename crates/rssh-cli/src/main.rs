@@ -148,10 +148,7 @@ fn main() -> ExitCode {
         Some(Commands::Unlock { pass_fd }) => commands::UnlockCommand::execute(cli.socket, pass_fd),
         Some(Commands::Stop { socket }) => commands::StopCommand::execute(socket.or(cli.socket)),
         #[cfg(feature = "tui")]
-        Some(Commands::Manage) => {
-            eprintln!("Manage command not yet implemented");
-            Ok(())
-        }
+        Some(Commands::Manage) => commands::ManageCommand::execute(cli.socket),
         Some(Commands::Completion { shell }) => {
             use clap::CommandFactory;
             use clap_complete::{Shell, generate};

@@ -1654,10 +1654,12 @@ dependencies = [
 name = "rssh-tui"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "crossterm",
  "ratatui",
  "rssh-core",
  "rssh-proto",
+ "serde",
  "tempfile",
  "thiserror",
  "tracing",

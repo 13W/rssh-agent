@@ -23,6 +23,7 @@ pub enum MessageType {
     IdentitiesAnswer = 12,
     SignResponse = 14,
     ExtensionFailure = 28,
+    ExtensionResponse = 29,
 }
 
 impl MessageType {
@@ -44,6 +45,7 @@ impl MessageType {
             25 => Some(Self::AddIdConstrained),
             27 => Some(Self::Extension),
             28 => Some(Self::ExtensionFailure),
+            29 => Some(Self::ExtensionResponse),
             _ => None,
         }
     }
