@@ -112,13 +112,34 @@ impl Agent {
             None => return Ok(messages::build_failure()),
         };
 
-        // TODO: Implement actual signing
         tracing::debug!(
-            "Sign request for key blob of {} bytes",
-            request.key_blob.len()
+            "Sign request for key blob of {} bytes, data {} bytes, flags: 0x{:02x}",
+            request.key_blob.len(),
+            request.data.len(),
+            request.flags
         );
 
-        Ok(messages::build_failure())
+        // Calculate fingerprint from the key blob to find the key
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&request.key_blob);
+        let fingerprint = hex::encode(hasher.finalize());
+
+        // Find and sign with the key
+        match self.ram_store.with_key(&fingerprint, |key_data| {
+            use crate::signing;
+            signing::sign_data(key_data, &request.data, request.flags)
+                .map_err(|e| rssh_core::Error::Internal(e))
+        }) {
+            Ok(signature) => {
+                tracing::info!("Signed data with key {}", fingerprint);
+                Ok(messages::build_sign_response(&signature))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to sign with key {}: {}", fingerprint, e);
+                Ok(messages::build_failure())
+            }
+        }
     }
 
     async fn handle_add_identity(&self, message: &[u8]) -> Result<Vec<u8>> {
