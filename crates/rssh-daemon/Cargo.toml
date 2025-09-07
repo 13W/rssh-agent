@@ -1,0 +1,21 @@
+[package]
+name = "rssh-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rssh-core = { workspace = true }
+rssh-proto = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+nix = { workspace = true }
+rpassword = { workspace = true }
+zeroize = { workspace = true }
+atty = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
