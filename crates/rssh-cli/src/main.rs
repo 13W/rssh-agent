@@ -152,8 +152,18 @@ fn main() -> ExitCode {
             eprintln!("Manage command not yet implemented");
             Ok(())
         }
-        Some(Commands::Completion { .. }) => {
-            eprintln!("Completion command not yet implemented");
+        Some(Commands::Completion { shell }) => {
+            use clap::CommandFactory;
+            use clap_complete::{Shell, generate};
+
+            let mut cmd = Cli::command();
+            let shell = match shell {
+                CompletionShell::Bash => Shell::Bash,
+                CompletionShell::Zsh => Shell::Zsh,
+                CompletionShell::Fish => Shell::Fish,
+            };
+
+            generate(shell, &mut cmd, "rssh-agent", &mut std::io::stdout());
             Ok(())
         }
         Some(Commands::Man) => {

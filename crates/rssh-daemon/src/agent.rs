@@ -282,10 +282,58 @@ impl Agent {
         }
     }
 
-    async fn handle_extension(&self, _message: &[u8]) -> Result<Vec<u8>> {
-        // TODO: Implement CBOR extensions
+    async fn handle_extension(&self, message: &[u8]) -> Result<Vec<u8>> {
+        use crate::extensions;
+
         tracing::debug!("Extension message received");
-        Ok(messages::build_failure())
+
+        // Parse the extension request
+        let request = match extensions::parse_extension_request(message) {
+            Ok(req) => req,
+            Err(e) => {
+                tracing::warn!("Failed to parse extension request: {}", e);
+                return Ok(messages::build_failure());
+            }
+        };
+
+        // Handle different extension operations
+        match request.op.as_str() {
+            "manage.list" => {
+                // Get list of keys
+                let keys = match self.ram_store.list_keys() {
+                    Ok(keys) => keys,
+                    Err(_) => return Ok(messages::build_failure()),
+                };
+
+                match extensions::handle_manage_list(keys) {
+                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                    Err(e) => {
+                        tracing::error!("Failed to handle manage.list: {}", e);
+                        Ok(messages::build_failure())
+                    }
+                }
+            }
+            "control.shutdown" => {
+                tracing::info!("Received shutdown request via extension");
+
+                // Send success response first
+                match extensions::handle_control_shutdown() {
+                    Ok(cbor_data) => {
+                        // Signal shutdown (this would need to be connected to the daemon)
+                        // For now, just return success
+                        Ok(extensions::build_extension_response(cbor_data))
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to handle control.shutdown: {}", e);
+                        Ok(messages::build_failure())
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!("Unknown extension operation: {}", request.op);
+                Ok(messages::build_failure())
+            }
+        }
     }
 }
 

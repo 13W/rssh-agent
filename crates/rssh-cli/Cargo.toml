@@ -16,6 +16,7 @@ rssh-proto = { workspace = true }
 rssh-daemon = { workspace = true }
 rssh-tui = { workspace = true, optional = true }
 clap = { workspace = true }
+clap_complete = "4.5"
 tokio = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
