@@ -12,6 +12,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 const DEFAULT_MESSAGE_LIMIT: usize = 1024 * 1024; // 1 MiB
 const MAX_CONCURRENT_CLIENTS: usize = 64;
+#[allow(dead_code)]
 const SOCKET_BACKLOG: u32 = 128;
 
 /// Socket server for the SSH agent
@@ -98,7 +99,7 @@ impl SocketServer {
                 if let Err(e) = handle_client(stream, agent).await {
                     tracing::error!("Client handler error: {}", e);
                 }
-                client_count -= 1;
+                let _ = client_count.saturating_sub(1);
             });
         }
     }
@@ -189,7 +190,9 @@ async fn handle_client(mut stream: UnixStream, agent: Arc<Agent>) -> Result<()> 
 #[derive(Debug)]
 struct PeerCredentials {
     uid: Uid,
+    #[allow(dead_code)]
     gid: Gid,
+    #[allow(dead_code)]
     pid: i32,
 }
 

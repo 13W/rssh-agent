@@ -13,7 +13,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const KDF_DOMAIN: &str = "rssh-agent:v1:mem";
 const MAX_LOADED_KEYS: usize = 1024;
+#[allow(dead_code)]
 const MAX_UNLOCK_ATTEMPTS: u32 = 3;
+#[allow(dead_code)]
 const COOLDOWN_DURATION: Duration = Duration::from_secs(60);
 
 /// Encrypted key data stored in RAM
@@ -27,6 +29,7 @@ struct EncryptedKey {
     has_cert: bool,
     confirm: bool,
     lifetime_expires_at: Option<Instant>,
+    #[allow(dead_code)]
     created: Instant,
 }
 

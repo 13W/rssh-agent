@@ -3,7 +3,9 @@ use rssh_proto::{messages, wire};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+#[allow(dead_code)]
 const DEFAULT_MESSAGE_LIMIT: usize = 1024 * 1024; // 1 MiB
+#[allow(dead_code)]
 const MANAGE_LIST_LIMIT: usize = 8 * 1024 * 1024; // 8 MiB
 
 /// SSH agent implementation
