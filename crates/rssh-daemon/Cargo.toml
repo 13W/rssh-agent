@@ -16,6 +16,8 @@ nix = { workspace = true }
 rpassword = { workspace = true }
 zeroize = { workspace = true }
 atty = { workspace = true }
+libc = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

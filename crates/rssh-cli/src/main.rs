@@ -131,22 +131,22 @@ fn main() -> ExitCode {
     // Execute command
     let result = match cli.command {
         Some(Commands::Init { dir }) => commands::InitCommand::execute(dir),
-        Some(Commands::Daemon { .. }) => {
-            eprintln!("Daemon command not yet implemented");
-            Ok(())
+        Some(Commands::Daemon {
+            sh,
+            csh,
+            fish,
+            socket,
+            foreground,
+        }) => {
+            // Create a runtime for async operations
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(commands::DaemonCommand::execute(
+                sh, csh, fish, socket, foreground, cli.dir,
+            ))
         }
-        Some(Commands::Lock) => {
-            eprintln!("Lock command not yet implemented");
-            Ok(())
-        }
-        Some(Commands::Unlock { .. }) => {
-            eprintln!("Unlock command not yet implemented");
-            Ok(())
-        }
-        Some(Commands::Stop { .. }) => {
-            eprintln!("Stop command not yet implemented");
-            Ok(())
-        }
+        Some(Commands::Lock) => commands::LockCommand::execute(cli.socket),
+        Some(Commands::Unlock { pass_fd }) => commands::UnlockCommand::execute(cli.socket, pass_fd),
+        Some(Commands::Stop { socket }) => commands::StopCommand::execute(socket.or(cli.socket)),
         #[cfg(feature = "tui")]
         Some(Commands::Manage) => {
             eprintln!("Manage command not yet implemented");
