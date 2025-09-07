@@ -1,0 +1,272 @@
+use rssh_core::{Error, Result, ram_store::RamStore};
+use rssh_proto::{messages, wire};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+const DEFAULT_MESSAGE_LIMIT: usize = 1024 * 1024; // 1 MiB
+const MANAGE_LIST_LIMIT: usize = 8 * 1024 * 1024; // 8 MiB
+
+/// SSH agent implementation
+pub struct Agent {
+    ram_store: Arc<RamStore>,
+    locked: Arc<RwLock<bool>>,
+}
+
+impl Agent {
+    /// Create a new agent
+    pub fn new() -> Self {
+        Agent {
+            ram_store: Arc::new(RamStore::new()),
+            locked: Arc::new(RwLock::new(true)), // Start locked
+        }
+    }
+
+    /// Handle an incoming message
+    pub async fn handle_message(&self, message: &[u8]) -> Result<Vec<u8>> {
+        if message.is_empty() {
+            return Ok(messages::build_failure());
+        }
+
+        let msg_type = wire::MessageType::from_u8(message[0]);
+
+        // Check if locked (only UNLOCK allowed when locked)
+        if *self.locked.read().await {
+            if msg_type != Some(wire::MessageType::Unlock) {
+                return Ok(messages::build_failure());
+            }
+        }
+
+        match msg_type {
+            Some(wire::MessageType::RequestIdentities) => {
+                self.handle_request_identities(message).await
+            }
+            Some(wire::MessageType::SignRequest) => self.handle_sign_request(message).await,
+            Some(wire::MessageType::AddIdentity) => self.handle_add_identity(message).await,
+            Some(wire::MessageType::AddIdConstrained) => {
+                self.handle_add_id_constrained(message).await
+            }
+            Some(wire::MessageType::RemoveIdentity) => self.handle_remove_identity(message).await,
+            Some(wire::MessageType::RemoveAllIdentities) => {
+                self.handle_remove_all_identities(message).await
+            }
+            Some(wire::MessageType::Lock) => self.handle_lock(message).await,
+            Some(wire::MessageType::Unlock) => self.handle_unlock(message).await,
+            Some(wire::MessageType::AddSmartcardKey)
+            | Some(wire::MessageType::RemoveSmartcardKey) => {
+                // PKCS#11 not supported
+                tracing::warn!("PKCS#11 smartcard operations not supported");
+                Ok(messages::build_failure())
+            }
+            Some(wire::MessageType::Extension) => self.handle_extension(message).await,
+            _ => {
+                tracing::warn!("Unknown message type: {:?}", message[0]);
+                Ok(messages::build_failure())
+            }
+        }
+    }
+
+    async fn handle_request_identities(&self, message: &[u8]) -> Result<Vec<u8>> {
+        if messages::parse_request_identities(message).is_none() {
+            return Ok(messages::build_failure());
+        }
+
+        let keys = match self.ram_store.list_keys() {
+            Ok(keys) => keys,
+            Err(_) => return Ok(messages::build_failure()),
+        };
+
+        let identities: Vec<messages::Identity> = keys
+            .into_iter()
+            .map(|key| messages::Identity {
+                public_key: vec![], // TODO: Get actual public key
+                comment: key.description,
+            })
+            .collect();
+
+        Ok(messages::build_identities_answer(&identities))
+    }
+
+    async fn handle_sign_request(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let request = match messages::parse_sign_request(message) {
+            Some(req) => req,
+            None => return Ok(messages::build_failure()),
+        };
+
+        // TODO: Implement actual signing
+        tracing::debug!(
+            "Sign request for key blob of {} bytes",
+            request.key_blob.len()
+        );
+
+        Ok(messages::build_failure())
+    }
+
+    async fn handle_add_identity(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let identity = match messages::parse_add_identity(message) {
+            Some(id) => id,
+            None => return Ok(messages::build_failure()),
+        };
+
+        tracing::debug!("Add identity: {} ({})", identity.comment, identity.key_type);
+
+        // TODO: Parse the key and add to RAM store
+
+        Ok(messages::build_success())
+    }
+
+    async fn handle_add_id_constrained(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let identity = match messages::parse_add_id_constrained(message) {
+            Some(id) => id,
+            None => return Ok(messages::build_failure()),
+        };
+
+        // Check for unsupported constraints
+        for constraint in &identity.constraints {
+            if matches!(constraint, wire::Constraint::Unknown(_)) {
+                tracing::warn!("Unknown constraint type");
+                return Ok(messages::build_failure());
+            }
+        }
+
+        // Check lifetime constraint
+        if let Some(lifetime) = identity.lifetime_secs() {
+            const MAX_LIFETIME: u32 = 30 * 24 * 60 * 60; // 30 days
+            if lifetime > MAX_LIFETIME {
+                tracing::warn!("Lifetime too long: {} > {}", lifetime, MAX_LIFETIME);
+                return Ok(messages::build_failure());
+            }
+        }
+
+        tracing::debug!(
+            "Add constrained identity: {} ({}) confirm={} lifetime={:?}",
+            identity.comment,
+            identity.key_type,
+            identity.has_confirm(),
+            identity.lifetime_secs()
+        );
+
+        // TODO: Parse the key and add to RAM store with constraints
+
+        Ok(messages::build_success())
+    }
+
+    async fn handle_remove_identity(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let key_blob = match messages::parse_remove_identity(message) {
+            Some(blob) => blob,
+            None => return Ok(messages::build_failure()),
+        };
+
+        tracing::debug!("Remove identity with {} byte key blob", key_blob.len());
+
+        // TODO: Find key by public key blob and remove
+
+        Ok(messages::build_failure())
+    }
+
+    async fn handle_remove_all_identities(&self, message: &[u8]) -> Result<Vec<u8>> {
+        if messages::parse_remove_all_identities(message).is_none() {
+            return Ok(messages::build_failure());
+        }
+
+        match self.ram_store.clear_all() {
+            Ok(_) => {
+                tracing::info!("Removed all identities from RAM");
+                Ok(messages::build_success())
+            }
+            Err(_) => Ok(messages::build_failure()),
+        }
+    }
+
+    async fn handle_lock(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let _passphrase = match messages::parse_lock(message) {
+            Some(pass) => pass,
+            None => return Ok(messages::build_failure()),
+        };
+
+        // Note: OpenSSH ignores the lock passphrase
+
+        match self.ram_store.lock() {
+            Ok(_) => {
+                let mut locked = self.locked.write().await;
+                *locked = true;
+                tracing::info!("Agent locked");
+                Ok(messages::build_success())
+            }
+            Err(_) => Ok(messages::build_failure()),
+        }
+    }
+
+    async fn handle_unlock(&self, message: &[u8]) -> Result<Vec<u8>> {
+        let passphrase = match messages::parse_unlock(message) {
+            Some(pass) => pass,
+            None => return Ok(messages::build_failure()),
+        };
+
+        let passphrase_str = String::from_utf8_lossy(&passphrase);
+
+        match self.ram_store.unlock(&passphrase_str) {
+            Ok(_) => {
+                let mut locked = self.locked.write().await;
+                *locked = false;
+                tracing::info!("Agent unlocked");
+                Ok(messages::build_success())
+            }
+            Err(e) => {
+                tracing::warn!("Unlock failed: {}", e);
+                Ok(messages::build_failure())
+            }
+        }
+    }
+
+    async fn handle_extension(&self, _message: &[u8]) -> Result<Vec<u8>> {
+        // TODO: Implement CBOR extensions
+        tracing::debug!("Extension message received");
+        Ok(messages::build_failure())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_locked_behavior() {
+        let agent = Agent::new();
+
+        // Should be locked initially
+        assert!(*agent.locked.read().await);
+
+        // REQUEST_IDENTITIES should fail when locked
+        let msg = vec![wire::MessageType::RequestIdentities as u8];
+        let response = agent.handle_message(&msg).await.unwrap();
+        assert_eq!(response, messages::build_failure());
+
+        // UNLOCK should work when locked
+        let mut unlock_msg = vec![wire::MessageType::Unlock as u8];
+        wire::write_string(&mut unlock_msg, b"password");
+        let response = agent.handle_message(&unlock_msg).await.unwrap();
+        assert_eq!(response, messages::build_success());
+
+        // Should be unlocked now
+        assert!(!*agent.locked.read().await);
+
+        // REQUEST_IDENTITIES should work when unlocked
+        let response = agent.handle_message(&msg).await.unwrap();
+        assert_eq!(response[0], wire::MessageType::IdentitiesAnswer as u8);
+    }
+
+    #[tokio::test]
+    async fn test_remove_all() {
+        let agent = Agent::new();
+
+        // Unlock first
+        let mut unlock_msg = vec![wire::MessageType::Unlock as u8];
+        wire::write_string(&mut unlock_msg, b"password");
+        agent.handle_message(&unlock_msg).await.unwrap();
+
+        // Remove all identities
+        let msg = vec![wire::MessageType::RemoveAllIdentities as u8];
+        let response = agent.handle_message(&msg).await.unwrap();
+        assert_eq!(response, messages::build_success());
+    }
+}
