@@ -85,8 +85,8 @@ pub fn handle_manage_list(
                 has_disk: key_on_disk,  // True if key exists on disk
                 has_cert: key.has_cert,
                 constraints,
-                created: None,  // TODO: Track creation time
-                updated: None,  // TODO: Track update time
+                created: Some(key.created.to_rfc3339()),  // Use actual creation time
+                updated: key.updated.map(|t| t.to_rfc3339()),  // Use actual update time
             }
         })
         .collect();

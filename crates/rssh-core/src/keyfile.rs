@@ -197,19 +197,18 @@ pub fn read<P: AsRef<Path>>(
     validate_description(&payload.description)?;
 
     // Verify fingerprint matches the public key in secret_openssh_b64
-    use crate::openssh::SshPrivateKey;
-    
+    // Note: secret_openssh_b64 contains wire format key data (as stored by handle_manage_import)
     let key_data = BASE64
         .decode(&payload.secret_openssh_b64)
         .map_err(|e| Error::Config(format!("Invalid base64 in secret key: {}", e)))?;
     
-    // Parse the OpenSSH private key to extract public key
-    let ssh_key = SshPrivateKey::from_openssh(&key_data, None)
-        .map_err(|e| Error::Config(format!("Failed to parse SSH key: {:?}", e)))?;
-    
-    // Calculate fingerprint from public key and verify it matches
-    let public_key_bytes = ssh_key.public_key_bytes();
-    let calculated_fingerprint = calculate_fingerprint_hex(&public_key_bytes);
+    // Parse wire format key data to extract public key and calculate fingerprint
+    let calculated_fingerprint = match parse_wire_key_fingerprint(&key_data) {
+        Ok(fp) => fp,
+        Err(e) => {
+            return Err(Error::Config(format!("Failed to parse wire format key: {}", e)));
+        }
+    };
     
     if calculated_fingerprint != fingerprint_hex {
         return Err(Error::Config(format!(
@@ -278,6 +277,106 @@ fn validate_description(desc: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parse wire format key data to extract fingerprint
+/// This is a simplified version of the key_utils::parse_wire_key function
+/// that only calculates the fingerprint without returning the full parsed data.
+fn parse_wire_key_fingerprint(key_data: &[u8]) -> Result<String> {
+    let mut offset = 0;
+
+    // Read key type (length-prefixed string)
+    let key_type_len = if key_data.len() < 4 {
+        return Err(Error::Config("Key data too short to read type length".into()));
+    } else {
+        u32::from_be_bytes([key_data[0], key_data[1], key_data[2], key_data[3]]) as usize
+    };
+    offset += 4;
+    
+    if offset + key_type_len > key_data.len() {
+        return Err(Error::Config("Key data too short to read type".into()));
+    }
+    
+    let key_type = &key_data[offset..offset + key_type_len];
+    let key_type_str = std::str::from_utf8(key_type)
+        .map_err(|e| Error::Config(format!("Invalid key type: {}", e)))?;
+    offset += key_type_len;
+
+    match key_type_str {
+        "ssh-ed25519" => {
+            // Read public key (length-prefixed)
+            if offset + 4 > key_data.len() {
+                return Err(Error::Config("Key data too short to read Ed25519 public key length".into()));
+            }
+            let pub_key_len = u32::from_be_bytes([
+                key_data[offset], key_data[offset + 1], 
+                key_data[offset + 2], key_data[offset + 3]
+            ]) as usize;
+            offset += 4;
+            
+            if offset + pub_key_len > key_data.len() {
+                return Err(Error::Config("Key data too short to read Ed25519 public key".into()));
+            }
+            let pub_key = &key_data[offset..offset + pub_key_len];
+
+            // Calculate fingerprint from public key blob
+            let mut pub_key_blob = Vec::new();
+            pub_key_blob.extend_from_slice(&(11u32).to_be_bytes()); // "ssh-ed25519" length
+            pub_key_blob.extend_from_slice(b"ssh-ed25519");
+            pub_key_blob.extend_from_slice(&(pub_key_len as u32).to_be_bytes());
+            pub_key_blob.extend_from_slice(pub_key);
+
+            let mut hasher = Sha256::new();
+            hasher.update(&pub_key_blob);
+            Ok(hex::encode(hasher.finalize()))
+        }
+        "ssh-rsa" => {
+            // Read n (modulus) - first component
+            if offset + 4 > key_data.len() {
+                return Err(Error::Config("Key data too short to read RSA n length".into()));
+            }
+            let n_len = u32::from_be_bytes([
+                key_data[offset], key_data[offset + 1], 
+                key_data[offset + 2], key_data[offset + 3]
+            ]) as usize;
+            offset += 4;
+            
+            if offset + n_len > key_data.len() {
+                return Err(Error::Config("Key data too short to read RSA n".into()));
+            }
+            let n = &key_data[offset..offset + n_len];
+            offset += n_len;
+
+            // Read e (public exponent) - second component
+            if offset + 4 > key_data.len() {
+                return Err(Error::Config("Key data too short to read RSA e length".into()));
+            }
+            let e_len = u32::from_be_bytes([
+                key_data[offset], key_data[offset + 1], 
+                key_data[offset + 2], key_data[offset + 3]
+            ]) as usize;
+            offset += 4;
+            
+            if offset + e_len > key_data.len() {
+                return Err(Error::Config("Key data too short to read RSA e".into()));
+            }
+            let e = &key_data[offset..offset + e_len];
+
+            // Build public key blob for fingerprint (SSH wire format: type, e, n)
+            let mut pub_key_blob = Vec::new();
+            pub_key_blob.extend_from_slice(&(7u32).to_be_bytes()); // "ssh-rsa" length
+            pub_key_blob.extend_from_slice(b"ssh-rsa");
+            pub_key_blob.extend_from_slice(&(e_len as u32).to_be_bytes());
+            pub_key_blob.extend_from_slice(e);
+            pub_key_blob.extend_from_slice(&(n_len as u32).to_be_bytes());
+            pub_key_blob.extend_from_slice(n);
+
+            let mut hasher = Sha256::new();
+            hasher.update(&pub_key_blob);
+            Ok(hex::encode(hasher.finalize()))
+        }
+        _ => Err(Error::Config(format!("Unsupported key type: {}", key_type_str))),
+    }
+}
+
 fn derive_key(
     password: &str,
     salt: &[u8],
@@ -319,14 +418,32 @@ fn test_keyfile_roundtrip() {
     
     // Generate a real SSH key
     let ssh_key = SshPrivateKey::generate_ed25519().unwrap();
-    let key_bytes = ssh_key.to_openssh(None, None).unwrap();
     let public_key_bytes = ssh_key.public_key_bytes();
     let fingerprint = calculate_fingerprint_hex(&public_key_bytes);
+    
+    // Create wire format key data (like handle_manage_import does)
+    // For Ed25519: key_type + pub_key + priv_key (64 bytes total)
+    let mut wire_key_data = Vec::new();
+    
+    // Key type: "ssh-ed25519" (length-prefixed)
+    wire_key_data.extend_from_slice(&(11u32).to_be_bytes());
+    wire_key_data.extend_from_slice(b"ssh-ed25519");
+    
+    // Public key (32 bytes for Ed25519, length-prefixed)
+    let pub_key_raw = &public_key_bytes[19..]; // Skip SSH wire protocol header to get raw 32-byte key
+    wire_key_data.extend_from_slice(&(32u32).to_be_bytes());
+    wire_key_data.extend_from_slice(pub_key_raw);
+    
+    // Private key (64 bytes for Ed25519: 32 secret + 32 public, length-prefixed)
+    // For testing, we'll create fake private key data
+    let fake_priv_key = [42u8; 64]; // 64 bytes of test data
+    wire_key_data.extend_from_slice(&(64u32).to_be_bytes());
+    wire_key_data.extend_from_slice(&fake_priv_key);
     
     let payload = KeyPayload {
         key_type: KeyType::Ed25519,
         description: "test key".to_string(),
-        secret_openssh_b64: BASE64.encode(&key_bytes),
+        secret_openssh_b64: BASE64.encode(&wire_key_data),
         cert_openssh_b64: None,
         created: Utc::now(),
         updated: Utc::now(),
@@ -353,14 +470,62 @@ fn test_wrong_password() {
     
     // Generate a real RSA SSH key
     let ssh_key = SshPrivateKey::generate_rsa(2048).unwrap();
-    let key_bytes = ssh_key.to_openssh(None, None).unwrap();
     let public_key_bytes = ssh_key.public_key_bytes();
     let fingerprint = calculate_fingerprint_hex(&public_key_bytes);
+    
+    // Create wire format RSA key data for testing
+    // RSA wire format: key_type + n + e + d + iqmp + p + q
+    let mut wire_key_data = Vec::new();
+    
+    // Key type: "ssh-rsa" (length-prefixed)
+    wire_key_data.extend_from_slice(&(7u32).to_be_bytes());
+    wire_key_data.extend_from_slice(b"ssh-rsa");
+    
+    // Extract e (public exponent) and n (modulus) from SSH public key blob
+    // SSH RSA public key format: "ssh-rsa" + e + n
+    let mut offset = 4; // Skip length prefix
+    let key_type_len = u32::from_be_bytes([
+        public_key_bytes[0], public_key_bytes[1], 
+        public_key_bytes[2], public_key_bytes[3]
+    ]) as usize;
+    offset += key_type_len; // Skip "ssh-rsa"
+    
+    // Read e (public exponent)
+    let e_len = u32::from_be_bytes([
+        public_key_bytes[offset], public_key_bytes[offset + 1], 
+        public_key_bytes[offset + 2], public_key_bytes[offset + 3]
+    ]) as usize;
+    offset += 4;
+    let e = &public_key_bytes[offset..offset + e_len];
+    offset += e_len;
+    
+    // Read n (modulus)  
+    let n_len = u32::from_be_bytes([
+        public_key_bytes[offset], public_key_bytes[offset + 1], 
+        public_key_bytes[offset + 2], public_key_bytes[offset + 3]
+    ]) as usize;
+    offset += 4;
+    let n = &public_key_bytes[offset..offset + n_len];
+    
+    // Add n (modulus) to wire format
+    wire_key_data.extend_from_slice(&(n_len as u32).to_be_bytes());
+    wire_key_data.extend_from_slice(n);
+    
+    // Add e (public exponent) to wire format
+    wire_key_data.extend_from_slice(&(e_len as u32).to_be_bytes());
+    wire_key_data.extend_from_slice(e);
+    
+    // Add fake private components (d, iqmp, p, q)
+    let fake_component = vec![42u8; 256]; // 256 bytes of fake data
+    for _ in 0..4 { // d, iqmp, p, q
+        wire_key_data.extend_from_slice(&(fake_component.len() as u32).to_be_bytes());
+        wire_key_data.extend_from_slice(&fake_component);
+    }
     
     let payload = KeyPayload {
         key_type: KeyType::Rsa,
         description: "test rsa".to_string(),
-        secret_openssh_b64: BASE64.encode(&key_bytes),
+        secret_openssh_b64: BASE64.encode(&wire_key_data),
         cert_openssh_b64: Some(BASE64.encode(b"fake cert")),
         created: Utc::now(),
         updated: Utc::now(),

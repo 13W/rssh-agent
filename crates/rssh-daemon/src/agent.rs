@@ -279,9 +279,28 @@ impl Agent {
 
         tracing::debug!("Remove identity with {} byte key blob", key_blob.len());
 
-        // TODO: Find key by public key blob and remove
+        // Calculate fingerprint from the public key blob to find the key
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&key_blob);
+        let fingerprint = hex::encode(hasher.finalize());
 
-        Ok(messages::build_failure())
+        // Try to remove the key from RAM store
+        match self.ram_store.unload_key(&fingerprint) {
+            Ok(_) => {
+                tracing::info!("Removed identity with fingerprint: {}", fingerprint);
+                Ok(messages::build_success())
+            }
+            Err(rssh_core::Error::NotLoaded) => {
+                tracing::debug!("Identity not found for removal: {}", fingerprint);
+                // Per spec: not found → FAILURE
+                Ok(messages::build_failure())
+            }
+            Err(e) => {
+                tracing::warn!("Failed to remove identity {}: {}", fingerprint, e);
+                Ok(messages::build_failure())
+            }
+        }
     }
 
     async fn handle_remove_all_identities(&self, message: &[u8]) -> Result<Vec<u8>> {

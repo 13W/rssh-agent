@@ -28,10 +28,10 @@ struct EncryptedKey {
     key_type: String,
     has_cert: bool,
     confirm: bool,
-    lifetime_expires_at: Option<Instant>,
+    lifetime_expires_at: Option<Instant>, // Keep as Instant for lifetime expiration logic
     is_external: bool, // true if added via ssh-add, false if managed by rssh-agent
-    #[allow(dead_code)]
-    created: Instant,
+    created: chrono::DateTime<chrono::Utc>, // Use DateTime for serialization compatibility
+    updated: Option<chrono::DateTime<chrono::Utc>>, // None for keys that haven't been updated since creation
 }
 
 /// Memory key for encrypting keys at rest in RAM
@@ -153,61 +153,62 @@ impl RamStore {
     }
 
     /// Internal method to load a key with external flag
-    fn load_key_internal(
-        &self,
-        fingerprint: &str,
-        key_data: &[u8],
-        description: String,
-        key_type: String,
-        has_cert: bool,
-        is_external: bool,
-    ) -> Result<()> {
-        let mut inner = self.inner.write().unwrap();
+fn load_key_internal(
+    &self,
+    fingerprint: &str,
+    key_data: &[u8],
+    description: String,
+    key_type: String,
+    has_cert: bool,
+    is_external: bool,
+) -> Result<()> {
+    let mut inner = self.inner.write().unwrap();
 
-        // Check if unlocked
-        let mem_key = inner.mem_key.as_ref().ok_or(Error::NeedMasterUnlock)?;
+    // Check if unlocked
+    let mem_key = inner.mem_key.as_ref().ok_or(Error::NeedMasterUnlock)?;
 
-        // Check limits
-        if inner.keys.len() >= MAX_LOADED_KEYS {
-            return Err(Error::TooManyKeys);
-        }
-
-        // Check for duplicates
-        if inner.keys.contains_key(fingerprint) {
-            return Err(Error::AlreadyLoaded);
-        }
-
-        // Generate nonce
-        let mut nonce = [0u8; 24];
-        OsRng.fill_bytes(&mut nonce);
-
-        // Encrypt the key data
-        let cipher = XChaCha20Poly1305::new_from_slice(&mem_key.key)
-            .map_err(|e| Error::Crypto(e.to_string()))?;
-        let nonce_obj = XNonce::from_slice(&nonce);
-        let ciphertext = cipher
-            .encrypt(nonce_obj, key_data)
-            .map_err(|e| Error::Crypto(e.to_string()))?;
-
-        // Store encrypted key
-        let encrypted_key = EncryptedKey {
-            nonce,
-            ciphertext,
-            description,
-            fingerprint: fingerprint.to_string(),
-            key_type,
-            has_cert,
-            confirm: false,
-            lifetime_expires_at: None,
-            is_external,
-            created: Instant::now(),
-        };
-
-        inner.keys.insert(fingerprint.to_string(), encrypted_key);
-        inner.insertion_order.push(fingerprint.to_string());
-
-        Ok(())
+    // Check limits
+    if inner.keys.len() >= MAX_LOADED_KEYS {
+        return Err(Error::TooManyKeys);
     }
+
+    // Check for duplicates
+    if inner.keys.contains_key(fingerprint) {
+        return Err(Error::AlreadyLoaded);
+    }
+
+    // Generate nonce
+    let mut nonce = [0u8; 24];
+    OsRng.fill_bytes(&mut nonce);
+
+    // Encrypt the key data
+    let cipher = XChaCha20Poly1305::new_from_slice(&mem_key.key)
+        .map_err(|e| Error::Crypto(e.to_string()))?;
+    let nonce_obj = XNonce::from_slice(&nonce);
+    let ciphertext = cipher
+        .encrypt(nonce_obj, key_data)
+        .map_err(|e| Error::Crypto(e.to_string()))?;
+
+    // Store encrypted key
+    let encrypted_key = EncryptedKey {
+        nonce,
+        ciphertext,
+        description,
+        fingerprint: fingerprint.to_string(),
+        key_type,
+        has_cert,
+        confirm: false,
+        lifetime_expires_at: None,
+        is_external,
+        created: chrono::Utc::now(),
+        updated: None, // No update yet since this is creation
+    };
+
+    inner.keys.insert(fingerprint.to_string(), encrypted_key);
+    inner.insertion_order.push(fingerprint.to_string());
+
+    Ok(())
+}
 
     /// Unload a key from RAM
     pub fn unload_key(&self, fingerprint: &str) -> Result<()> {
@@ -227,30 +228,32 @@ impl RamStore {
     }
 
     /// List all loaded keys
-    pub fn list_keys(&self) -> Result<Vec<KeyInfo>> {
-        let inner = self.inner.read().unwrap();
+pub fn list_keys(&self) -> Result<Vec<KeyInfo>> {
+    let inner = self.inner.read().unwrap();
 
-        if inner.mem_key.is_none() {
-            return Err(Error::NeedMasterUnlock);
-        }
-
-        let mut keys = Vec::new();
-        for fp in &inner.insertion_order {
-            if let Some(key) = inner.keys.get(fp) {
-                keys.push(KeyInfo {
-                    fingerprint: key.fingerprint.clone(),
-                    description: key.description.clone(),
-                    key_type: key.key_type.clone(),
-                    has_cert: key.has_cert,
-                    confirm: key.confirm,
-                    lifetime_expires_at: key.lifetime_expires_at,
-                    is_external: key.is_external,
-                });
-            }
-        }
-
-        Ok(keys)
+    if inner.mem_key.is_none() {
+        return Err(Error::NeedMasterUnlock);
     }
+
+    let mut keys = Vec::new();
+    for fp in &inner.insertion_order {
+        if let Some(key) = inner.keys.get(fp) {
+            keys.push(KeyInfo {
+                fingerprint: key.fingerprint.clone(),
+                description: key.description.clone(),
+                key_type: key.key_type.clone(),
+                has_cert: key.has_cert,
+                confirm: key.confirm,
+                lifetime_expires_at: key.lifetime_expires_at,
+                is_external: key.is_external,
+                created: key.created,
+                updated: key.updated,
+            });
+        }
+    }
+
+    Ok(keys)
+}
 
     /// Get raw key data for an external key (for importing)
     pub fn get_external_key_data(&self, fingerprint: &str) -> Result<Vec<u8>> {
@@ -335,41 +338,43 @@ impl RamStore {
     }
 
     /// Set constraints for a key
-    pub fn set_constraints(
-        &self,
-        fingerprint: &str,
-        confirm: bool,
-        lifetime_secs: Option<u64>,
-    ) -> Result<()> {
-        let mut inner = self.inner.write().unwrap();
+pub fn set_constraints(
+    &self,
+    fingerprint: &str,
+    confirm: bool,
+    lifetime_secs: Option<u64>,
+) -> Result<()> {
+    let mut inner = self.inner.write().unwrap();
 
-        if inner.mem_key.is_none() {
-            return Err(Error::NeedMasterUnlock);
-        }
-
-        let key = inner.keys.get_mut(fingerprint).ok_or(Error::NotFound)?;
-
-        key.confirm = confirm;
-        key.lifetime_expires_at =
-            lifetime_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
-
-        Ok(())
+    if inner.mem_key.is_none() {
+        return Err(Error::NeedMasterUnlock);
     }
+
+    let key = inner.keys.get_mut(fingerprint).ok_or(Error::NotFound)?;
+
+    key.confirm = confirm;
+    key.lifetime_expires_at =
+        lifetime_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
+    key.updated = Some(chrono::Utc::now()); // Mark as updated
+
+    Ok(())
+}
 
     /// Update description for a key
-    pub fn update_description(&self, fingerprint: &str, description: String) -> Result<()> {
-        let mut inner = self.inner.write().unwrap();
+pub fn update_description(&self, fingerprint: &str, description: String) -> Result<()> {
+    let mut inner = self.inner.write().unwrap();
 
-        if inner.mem_key.is_none() {
-            return Err(Error::NeedMasterUnlock);
-        }
-
-        let key = inner.keys.get_mut(fingerprint).ok_or(Error::NotFound)?;
-
-        key.description = description;
-
-        Ok(())
+    if inner.mem_key.is_none() {
+        return Err(Error::NeedMasterUnlock);
     }
+
+    let key = inner.keys.get_mut(fingerprint).ok_or(Error::NotFound)?;
+
+    key.description = description;
+    key.updated = Some(chrono::Utc::now()); // Mark as updated
+
+    Ok(())
+}
 
     /// Clear all keys from RAM
     pub fn clear_all(&self) -> Result<()> {
@@ -394,8 +399,10 @@ pub struct KeyInfo {
     pub key_type: String,
     pub has_cert: bool,
     pub confirm: bool,
-    pub lifetime_expires_at: Option<Instant>,
+    pub lifetime_expires_at: Option<Instant>, // Keep as Instant for lifetime expiration logic
     pub is_external: bool,
+    pub created: chrono::DateTime<chrono::Utc>, // Use DateTime for serialization compatibility
+    pub updated: Option<chrono::DateTime<chrono::Utc>>, // None for keys that haven't been updated since creation
 }
 
 fn derive_mem_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {

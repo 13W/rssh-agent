@@ -1688,6 +1688,7 @@ dependencies = [
 name = "rssh-tui"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "ciborium",
  "crossterm",
  "ratatui",

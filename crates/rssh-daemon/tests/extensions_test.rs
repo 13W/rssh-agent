@@ -76,6 +76,8 @@ fn test_manage_list_handler() {
         confirm: false,
         lifetime_expires_at: None,
         is_external: false,
+        created: chrono::Utc::now(),
+        updated: None,
     }];
 
     let result = extensions::handle_manage_list(keys, None, None);

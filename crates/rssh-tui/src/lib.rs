@@ -37,12 +37,14 @@ pub struct App {
     pub input_mode: InputMode,
     pub input_buffer: String,
     pub should_quit: bool,
+    pub key_being_loaded: Option<String>, // Fingerprint of key being loaded with password
 }
 
 #[derive(PartialEq)]
 pub enum InputMode {
     Normal,
     Password,
+    KeyPassword,
     Confirm,
 }
 
@@ -60,6 +62,7 @@ impl App {
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             should_quit: false,
+            key_being_loaded: None,
         }
     }
 
@@ -211,14 +214,29 @@ fn run_app<B: Backend>(
                                         app.set_status("Key is not on disk".to_string());
                                     } else if key.loaded {
                                         app.set_status("Key is already loaded".to_string());
-                                    } else if let Err(e) =
-                                        load_disk_key(socket_path.as_ref(), &key.fingerprint)
-                                    {
-                                        app.set_status(format!("Failed to load key: {}", e));
                                     } else {
-                                        app.set_status("Key loaded successfully".to_string());
-                                        if let Err(e) = load_keys(app, socket_path.as_ref()) {
-                                            app.set_status(format!("Failed to refresh: {}", e));
+                                        // First try loading without password
+                                        match load_disk_key(socket_path.as_ref(), &key.fingerprint, None) {
+                                            Ok(()) => {
+                                                app.set_status("Key loaded successfully".to_string());
+                                                if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                                    app.set_status(format!("Failed to refresh: {}", e));
+                                                }
+                                            }
+                                            Err(e) => {
+                                                let error_msg = e.to_string();
+                                                // Check if it's a password-related error
+                                                if error_msg.contains("password") || error_msg.contains("passphrase") 
+                                                   || error_msg.contains("encrypted") || error_msg.contains("decrypt") {
+                                                    // Prompt for key password
+                                                    app.input_mode = InputMode::KeyPassword;
+                                                    app.input_buffer.clear();
+                                                    app.key_being_loaded = Some(key.fingerprint.clone());
+                                                    app.set_status("Key is password-protected. Enter password:".to_string());
+                                                } else {
+                                                    app.set_status(format!("Failed to load key: {}", e));
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -263,6 +281,39 @@ fn run_app<B: Backend>(
                         KeyCode::Esc => {
                             app.input_buffer.clear();
                             app.input_mode = InputMode::Normal;
+                            app.clear_status();
+                        }
+                        KeyCode::Char(c) => {
+                            app.input_buffer.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.input_buffer.pop();
+                        }
+                        _ => {}
+                    },
+                    InputMode::KeyPassword => match key.code {
+                        KeyCode::Enter => {
+                            if let Some(ref fingerprint) = app.key_being_loaded.clone() {
+                                match load_disk_key(socket_path.as_ref(), fingerprint, Some(&app.input_buffer)) {
+                                    Ok(()) => {
+                                        app.set_status("Key loaded successfully".to_string());
+                                        if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                            app.set_status(format!("Failed to refresh: {}", e));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app.set_status(format!("Failed to load key: {}", e));
+                                    }
+                                }
+                            }
+                            app.input_buffer.clear();
+                            app.input_mode = InputMode::Normal;
+                            app.key_being_loaded = None;
+                        }
+                        KeyCode::Esc => {
+                            app.input_buffer.clear();
+                            app.input_mode = InputMode::Normal;
+                            app.key_being_loaded = None;
                             app.clear_status();
                         }
                         KeyCode::Char(c) => {
@@ -472,6 +523,8 @@ fn ui(f: &mut Frame, app: &App) {
         msg.clone()
     } else if app.input_mode == InputMode::Password {
         format!("Password: {}", "*".repeat(app.input_buffer.len()))
+    } else if app.input_mode == InputMode::KeyPassword {
+        format!("Key password: {}", "*".repeat(app.input_buffer.len()))
     } else {
         format!("Keys: {} | Press h for help | q to quit", app.keys.len())
     };
@@ -693,6 +746,7 @@ fn remove_key(
 fn load_disk_key(
     socket_path: Option<&String>,
     fingerprint: &str,
+    key_password: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let socket = socket_path
         .map(|s| s.clone())
@@ -713,9 +767,14 @@ fn load_disk_key(
             key_pass_b64: Option<String>,
         }
 
+        let key_pass_b64 = key_password.map(|pass| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(pass.as_bytes())
+        });
+
         let req = LoadRequest {
             fp_sha256_hex: fingerprint.to_string(),
-            key_pass_b64: None, // TODO: Handle password-protected keys
+            key_pass_b64,
         };
 
         let mut cbor = Vec::new();
