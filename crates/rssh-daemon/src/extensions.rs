@@ -269,7 +269,7 @@ pub async fn handle_manage_import(
 /// Handle manage.load extension - loads a key from disk to RAM
 pub async fn handle_manage_load(
     data: &[u8],
-    _ram_store: &rssh_core::ram_store::RamStore,
+    ram_store: &rssh_core::ram_store::RamStore,
     storage_dir: Option<&str>,
 ) -> Result<Vec<u8>> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -294,19 +294,30 @@ pub async fn handle_manage_load(
     let master_password = "master_password";
 
     // Read the key file from disk
-    let _key_payload = KeyFile::read(storage_dir, &request.fp_sha256_hex, master_password)?;
+    let key_payload = KeyFile::read(storage_dir, &request.fp_sha256_hex, master_password)?;
 
-    // Decode the key passphrase if provided
-    let _key_passphrase = request
-        .key_pass_b64
-        .as_ref()
-        .map(|b64| BASE64.decode(b64))
-        .transpose()
-        .map_err(|e| Error::Internal(format!("Invalid base64 in key_pass_b64: {}", e)))?;
+    // The secret_openssh_b64 field actually contains wire format key data
+    // (despite the misleading field name - see handle_manage_import where it's stored)
+    // This is already in the format that RamStore expects
+    let wire_key_data = BASE64
+        .decode(&key_payload.secret_openssh_b64)
+        .map_err(|e| Error::Internal(format!("Failed to decode key data: {}", e)))?;
 
-    // TODO: Load the key into RAM store
-    // For now, just return success
-    // ram_store.load_from_disk(&request.fp_sha256_hex, key_payload, key_passphrase)?;
+    // Load the key into RAM store
+    // Use load_key (not load_external_key) since this is an internal key from disk
+    // Convert KeyType enum to string
+    let key_type_str = match key_payload.key_type {
+        rssh_core::keyfile::KeyType::Ed25519 => "ed25519".to_string(),
+        rssh_core::keyfile::KeyType::Rsa => "rsa".to_string(),
+    };
+
+    ram_store.load_key(
+        &request.fp_sha256_hex,
+        &wire_key_data,
+        key_payload.description,
+        key_type_str,
+        key_payload.cert_openssh_b64.is_some(),
+    )?;
 
     // Create success response
     let response_data = serde_json::json!({
@@ -331,7 +342,6 @@ pub async fn handle_manage_load(
 
     Ok(cbor_data)
 }
-
 /// Build an error response in CBOR format
 pub fn build_error_response(error: Error) -> Result<Vec<u8>> {
     let error_code = match error {
