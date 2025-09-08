@@ -12,18 +12,20 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::io;
-use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone)]
 pub struct KeyInfo {
     pub fingerprint: String,
     pub key_type: String,
-    pub comment: String,
-    pub locked: bool,
-    pub last_used: Option<SystemTime>,
-    pub use_count: u64,
-    pub constraints: Vec<String>,
-    pub is_external: bool,
+    pub format: String,
+    pub description: String,
+    pub source: String, // "internal" or "external"
+    pub loaded: bool,
+    pub has_disk: bool,
+    pub has_cert: bool,
+    pub constraints: serde_json::Value,
+    pub created: Option<String>,
+    pub updated: Option<String>,
 }
 
 pub struct App {
@@ -205,7 +207,7 @@ fn run_app<B: Backend>(
                                 if idx < app.keys.len() {
                                     let key = &app.keys[idx];
                                     // Check if key is external (can be imported)
-                                    if !key.is_external {
+                                    if key.source != "external" {
                                         app.set_status("Only external keys (added via ssh-add) can be imported".to_string());
                                     } else if let Err(e) =
                                         import_key(socket_path.as_ref(), &key.fingerprint)
@@ -362,23 +364,36 @@ fn ui(f: &mut Frame, app: &App) {
             .keys
             .iter()
             .map(|key| {
-                let mut spans = vec![
-                    Span::styled(
-                        format!("{} ", if key.locked { "🔒" } else { "🔓" }),
-                        Style::default(),
-                    ),
-                    Span::styled(
-                        if key.is_external { "[EXT]" } else { "[INT]" },
-                        Style::default().fg(if key.is_external {
-                            Color::Cyan
-                        } else {
-                            Color::Gray
-                        }),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(&key.key_type, Style::default().fg(Color::Green)),
-                    Span::raw(" "),
-                ];
+                let mut spans = vec![];
+
+                // Show key status based on loaded/disk status
+                let status = if key.source == "external" && key.loaded {
+                    "[EXT]" // External key loaded via ssh-add
+                } else if key.source == "internal" && key.loaded && key.has_disk {
+                    "[INT]" // Internal key loaded and on disk
+                } else if !key.loaded && key.has_disk {
+                    "[DISK]" // On disk but not loaded
+                } else {
+                    "[???]" // Shouldn't happen
+                };
+
+                spans.push(Span::styled(
+                    status,
+                    Style::default().fg(match status {
+                        "[EXT]" => Color::Cyan,
+                        "[INT]" => Color::Green,
+                        "[DISK]" => Color::Gray,
+                        _ => Color::Red,
+                    }),
+                ));
+                spans.push(Span::raw(" "));
+
+                // Key type
+                spans.push(Span::styled(
+                    &key.key_type,
+                    Style::default().fg(Color::Green),
+                ));
+                spans.push(Span::raw(" "));
 
                 // Show shortened fingerprint
                 let short_fp = if key.fingerprint.len() > 20 {
@@ -392,17 +407,20 @@ fn ui(f: &mut Frame, app: &App) {
                 };
                 spans.push(Span::styled(short_fp, Style::default().fg(Color::Yellow)));
 
-                if !key.comment.is_empty() {
-                    spans.push(Span::raw(format!(" ({})", key.comment)));
+                // Show description
+                if !key.description.is_empty() {
+                    spans.push(Span::raw(format!(" ({})", key.description)));
                 }
 
-                if let Some(last_used) = key.last_used {
-                    if let Ok(elapsed) = SystemTime::now().duration_since(last_used) {
-                        let mins = elapsed.as_secs() / 60;
-                        spans.push(Span::styled(
-                            format!(" [{}m ago]", mins),
-                            Style::default().fg(Color::DarkGray),
-                        ));
+                // Show if has cert
+                if key.has_cert {
+                    spans.push(Span::styled(" [CERT]", Style::default().fg(Color::Magenta)));
+                }
+
+                // Show constraints if any
+                if let Some(confirm) = key.constraints.get("confirm").and_then(|v| v.as_bool()) {
+                    if confirm {
+                        spans.push(Span::styled(" [C]", Style::default().fg(Color::Red)));
                     }
                 }
 
@@ -529,16 +547,17 @@ fn load_keys(
             app.keys = keys_data
                 .into_iter()
                 .map(|k| KeyInfo {
-                    fingerprint: k.fingerprint,
+                    fingerprint: k.fp_sha256_hex,
                     key_type: k.key_type,
-                    comment: k.comment,
-                    locked: k.locked,
-                    last_used: k
-                        .last_used
-                        .map(|ts| SystemTime::UNIX_EPOCH + Duration::from_secs(ts)),
-                    use_count: k.use_count,
+                    format: k.format,
+                    description: k.description,
+                    source: k.source,
+                    loaded: k.loaded,
+                    has_disk: k.has_disk,
+                    has_cert: k.has_cert,
                     constraints: k.constraints,
-                    is_external: k.is_external,
+                    created: k.created,
+                    updated: k.updated,
                 })
                 .collect();
 

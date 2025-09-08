@@ -1,5 +1,7 @@
 use rssh_core::{Error, Result, ram_store::KeyInfo};
 use serde::Deserialize;
+use std::collections::HashSet;
+use std::fs;
 
 pub const EXTENSION_NAMESPACE: &str = "rssh-agent@local";
 
@@ -13,32 +15,95 @@ pub use rssh_proto::cbor::ExtensionRequest;
 // pub struct ErrorInfo { ... }
 
 /// Handle manage.list extension
-pub fn handle_manage_list(keys: Vec<KeyInfo>) -> Result<Vec<u8>> {
+pub fn handle_manage_list(ram_keys: Vec<KeyInfo>, storage_dir: Option<&str>) -> Result<Vec<u8>> {
+    use chrono::Utc;
     use rssh_proto::cbor::{ManageListResponse, ManagedKey};
 
-    // Convert KeyInfo to ManagedKey
-    let managed_keys: Vec<ManagedKey> = keys
+    // Collect fingerprints of loaded keys
+    let loaded_fingerprints: HashSet<String> =
+        ram_keys.iter().map(|k| k.fingerprint.clone()).collect();
+
+    // Convert RAM keys to ManagedKey format
+    let mut managed_keys: Vec<ManagedKey> = ram_keys
         .into_iter()
-        .map(|key| ManagedKey {
-            fingerprint: key.fingerprint,
-            key_type: key.key_type,
-            comment: key.description.clone(), // Use description as comment
-            locked: false,                    // Keys are not individually locked
-            last_used: None,                  // TODO: Track last use time
-            use_count: 0,                     // TODO: Track use count
-            constraints: {
-                let mut c = Vec::new();
-                if key.confirm {
-                    c.push("confirm".to_string());
-                }
-                if key.lifetime_expires_at.is_some() {
-                    c.push("lifetime".to_string());
-                }
-                c
-            },
-            is_external: key.is_external,
+        .map(|key| {
+            // Determine format based on key type
+            let format = match key.key_type.as_str() {
+                "ed25519" => "ssh-ed25519",
+                "rsa" => "rsa-sha2-512",
+                _ => &key.key_type,
+            }.to_string();
+
+            // Build constraints object
+            let constraints = serde_json::json!({
+                "confirm": key.confirm,
+                "lifetime_expires_at": key.lifetime_expires_at.map(|t| {
+                    // Convert Instant to ISO 8601 string
+                    let duration = t.duration_since(std::time::Instant::now());
+                    let expires_at = Utc::now() + chrono::Duration::seconds(duration.as_secs() as i64);
+                    expires_at.to_rfc3339()
+                }),
+            });
+
+            ManagedKey {
+                fp_sha256_hex: key.fingerprint.clone(),
+                key_type: key.key_type,
+                format,
+                description: key.description,
+                source: if key.is_external { "external".to_string() } else { "internal".to_string() },
+                loaded: true,  // These are all loaded in RAM
+                has_disk: !key.is_external,  // Internal keys have disk entries
+                has_cert: key.has_cert,
+                constraints,
+                created: None,  // TODO: Track creation time
+                updated: None,  // TODO: Track update time
+            }
         })
         .collect();
+
+    // Add disk keys that are not loaded
+    if let Some(dir) = storage_dir {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Ok(file_name) = entry.file_name().into_string() {
+                    // Check if it's a key file (sha256-*.json)
+                    if file_name.starts_with("sha256-") && file_name.ends_with(".json") {
+                        // Extract fingerprint from filename
+                        let fingerprint = file_name
+                            .strip_prefix("sha256-")
+                            .and_then(|s| s.strip_suffix(".json"))
+                            .unwrap_or("")
+                            .to_string();
+
+                        // Skip if this key is already loaded
+                        if loaded_fingerprints.contains(&fingerprint) {
+                            continue;
+                        }
+
+                        // Try to read basic info from the file without decrypting
+                        // For now, we'll add a placeholder entry
+                        // In a real implementation, we might store metadata unencrypted
+                        managed_keys.push(ManagedKey {
+                            fp_sha256_hex: fingerprint,
+                            key_type: "unknown".to_string(), // Can't determine without decrypting
+                            format: "unknown".to_string(),
+                            description: "".to_string(), // Can't get without decrypting
+                            source: "internal".to_string(), // Disk keys are internal
+                            loaded: false,               // Not loaded in RAM
+                            has_disk: true,              // Obviously on disk
+                            has_cert: false,             // Can't determine without decrypting
+                            constraints: serde_json::json!({
+                                "confirm": false,
+                                "lifetime_expires_at": null,
+                            }),
+                            created: None,
+                            updated: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
 
     // Create ManageListResponse
     let list_response = ManageListResponse {
@@ -96,9 +161,9 @@ pub async fn handle_manage_import(
     data: &[u8],
     ram_store: &rssh_core::ram_store::RamStore,
 ) -> Result<Vec<u8>> {
-    use rssh_core::keyfile::{KeyFile, KeyPayload, KeyType};
-    use chrono::Utc;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    use chrono::Utc;
+    use rssh_core::keyfile::{KeyFile, KeyPayload, KeyType};
 
     #[derive(Debug, Deserialize)]
     struct ImportRequest {
@@ -117,25 +182,33 @@ pub async fn handle_manage_import(
 
     // Get key info for description and type
     let keys = ram_store.list_keys()?;
-    let key_info = keys.iter()
+    let key_info = keys
+        .iter()
         .find(|k| k.fingerprint == request.fp_sha256_hex)
         .ok_or(Error::NotFound)?;
-    
+
     // Use provided description or keep the existing one
-    let description = request.description.unwrap_or_else(|| key_info.description.clone());
-    
+    let description = request
+        .description
+        .unwrap_or_else(|| key_info.description.clone());
+
     // Determine key type from key_info
     let key_type = match key_info.key_type.as_str() {
         "ed25519" => KeyType::Ed25519,
         "rsa" => KeyType::Rsa,
-        _ => return Err(Error::Internal(format!("Unknown key type: {}", key_info.key_type))),
+        _ => {
+            return Err(Error::Internal(format!(
+                "Unknown key type: {}",
+                key_info.key_type
+            )));
+        }
     };
-    
+
     // Convert wire format key data to OpenSSH format
     // The key_data is already in the wire format that can be stored
     // For now, we'll store it as base64-encoded openssh-key-v1
     let secret_openssh_b64 = BASE64.encode(&key_data);
-    
+
     // Create KeyPayload
     let now = Utc::now();
     let payload = KeyPayload {
@@ -146,18 +219,17 @@ pub async fn handle_manage_import(
         created: now,
         updated: now,
     };
-    
+
     // Get storage directory from environment or use default
-    let storage_dir = std::env::var("RSSH_STORAGE_DIR")
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            format!("{}/.ssh/rssh-agent", home)
-        });
-    
+    let storage_dir = std::env::var("RSSH_STORAGE_DIR").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        format!("{}/.ssh/rssh-agent", home)
+    });
+
     // For now, use a default master password
     // In production, this should be obtained from the config or prompt
     let master_password = "master_password"; // TODO: Get actual master password
-    
+
     // Write key file to disk
     KeyFile::write(
         &storage_dir,
@@ -165,10 +237,10 @@ pub async fn handle_manage_import(
         &payload,
         master_password,
     )?;
-    
+
     // Mark the key as internal now that it's been imported
     ram_store.mark_key_as_internal(&request.fp_sha256_hex)?;
-    
+
     // Create success response
     let response_data = serde_json::json!({
         "ok": true,

@@ -56,8 +56,8 @@ impl ShellStyle {
 
 /// Run the daemon
 pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -> Result<()> {
-    // Create the agent
-    let agent = Arc::new(Agent::new());
+    // Create the agent with storage directory
+    let agent = Arc::new(Agent::with_storage_dir(config.storage_dir.clone()));
 
     // Create the socket server
     let server = if let Some(socket_path) = config.socket_path {

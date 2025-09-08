@@ -70,22 +70,36 @@ async fn test_manage_list_response_parsing() {
     // Create a test response with keys
     let test_keys = vec![
         ManagedKey {
-            fingerprint: "SHA256:test1".to_string(),
+            fp_sha256_hex: "SHA256:test1".to_string(),
             key_type: "ssh-ed25519".to_string(),
-            comment: "Test key 1".to_string(),
-            locked: false,
-            last_used: Some(1234567890),
-            use_count: 42,
-            constraints: vec!["confirm".to_string()],
+            format: "ssh-ed25519".to_string(),
+            description: "Test key 1".to_string(),
+            source: "internal".to_string(),
+            loaded: true,
+            has_disk: true,
+            has_cert: false,
+            constraints: serde_json::json!({
+                "confirm": true,
+                "lifetime_expires_at": null,
+            }),
+            created: None,
+            updated: None,
         },
         ManagedKey {
-            fingerprint: "SHA256:test2".to_string(),
+            fp_sha256_hex: "SHA256:test2".to_string(),
             key_type: "ssh-rsa".to_string(),
-            comment: "Test key 2".to_string(),
-            locked: false,
-            last_used: None,
-            use_count: 0,
-            constraints: vec![],
+            format: "rsa-sha2-512".to_string(),
+            description: "Test key 2".to_string(),
+            source: "external".to_string(),
+            loaded: true,
+            has_disk: false,
+            has_cert: false,
+            constraints: serde_json::json!({
+                "confirm": false,
+                "lifetime_expires_at": null,
+            }),
+            created: None,
+            updated: None,
         },
     ];
 
@@ -113,8 +127,8 @@ async fn test_manage_list_response_parsing() {
     let parsed_list: ManageListResponse = ciborium::from_reader(&parsed_ext.data[..]).unwrap();
     assert!(parsed_list.ok);
     assert_eq!(parsed_list.keys.len(), 2);
-    assert_eq!(parsed_list.keys[0].fingerprint, "SHA256:test1");
-    assert_eq!(parsed_list.keys[1].fingerprint, "SHA256:test2");
+    assert_eq!(parsed_list.keys[0].fp_sha256_hex, "SHA256:test1");
+    assert_eq!(parsed_list.keys[1].fp_sha256_hex, "SHA256:test2");
 }
 
 #[tokio::test]

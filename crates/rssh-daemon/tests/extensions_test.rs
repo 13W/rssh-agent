@@ -75,9 +75,10 @@ fn test_manage_list_handler() {
         has_cert: false,
         confirm: false,
         lifetime_expires_at: None,
+        is_external: false,
     }];
 
-    let result = extensions::handle_manage_list(keys);
+    let result = extensions::handle_manage_list(keys, None);
     assert!(result.is_ok());
 
     let cbor_data = result.unwrap();

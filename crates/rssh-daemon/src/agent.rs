@@ -12,6 +12,7 @@ const MANAGE_LIST_LIMIT: usize = 8 * 1024 * 1024; // 8 MiB
 pub struct Agent {
     ram_store: Arc<RamStore>,
     locked: Arc<RwLock<bool>>,
+    storage_dir: Option<String>,
 }
 
 impl Agent {
@@ -20,6 +21,16 @@ impl Agent {
         Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(true)), // Start locked
+            storage_dir: None,
+        }
+    }
+
+    /// Create a new agent with storage directory
+    pub fn with_storage_dir(storage_dir: String) -> Self {
+        Agent {
+            ram_store: Arc::new(RamStore::new()),
+            locked: Arc::new(RwLock::new(true)), // Start locked
+            storage_dir: Some(storage_dir),
         }
     }
 
@@ -305,7 +316,7 @@ impl Agent {
                     Err(_) => return Ok(messages::build_failure()),
                 };
 
-                match extensions::handle_manage_list(keys) {
+                match extensions::handle_manage_list(keys, self.storage_dir.as_deref()) {
                     Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
                     Err(e) => {
                         tracing::error!("Failed to handle manage.list: {}", e);

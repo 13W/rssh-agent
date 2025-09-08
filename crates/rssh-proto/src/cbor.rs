@@ -15,14 +15,18 @@ pub struct ExtensionResponse {
 /// Common key data structure used by both daemon and TUI
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManagedKey {
-    pub fingerprint: String,
+    pub fp_sha256_hex: String,
+    #[serde(rename = "type")]
     pub key_type: String,
-    pub comment: String,
-    pub locked: bool,
-    pub last_used: Option<u64>,
-    pub use_count: u64,
-    pub constraints: Vec<String>,
-    pub is_external: bool,
+    pub format: String,
+    pub description: String,
+    pub source: String, // "internal" | "external"
+    pub loaded: bool,
+    pub has_disk: bool,
+    pub has_cert: bool,
+    pub constraints: serde_json::Value, // Object with confirm and lifetime_expires_at
+    pub created: Option<String>,
+    pub updated: Option<String>,
 }
 
 /// Response for manage.list operation
