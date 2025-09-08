@@ -278,13 +278,26 @@ pub async fn handle_manage_import(
     // For now, we'll store it as base64-encoded openssh-key-v1
     let secret_openssh_b64 = BASE64.encode(&key_data);
 
+    // Handle certificates according to spec: "On import, if a cert is currently attached in RAM → auto-save into cert_openssh_b64"
+    let cert_openssh_b64 = if key_info.has_cert {
+        // Certificate is attached but current SSH agent protocol implementation doesn't store cert data in RAM
+        // This needs to be implemented in the SSH agent protocol parsing layer first
+        tracing::warn!(
+            "Key {} has certificate attached but certificate data extraction not yet implemented",
+            request.fp_sha256_hex
+        );
+        None // Will be implemented when SSH agent protocol supports certificate parsing
+    } else {
+        None // No certificate attached
+    };
+
     // Create KeyPayload
     let now = Utc::now();
     let payload = KeyPayload {
         key_type,
         description,
         secret_openssh_b64,
-        cert_openssh_b64: None, // TODO: Handle certificates if present
+        cert_openssh_b64,
         created: now,
         updated: now,
     };
