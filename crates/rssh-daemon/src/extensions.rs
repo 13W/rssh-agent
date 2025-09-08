@@ -15,58 +15,43 @@ pub use rssh_proto::cbor::ExtensionRequest;
 
 /// Handle manage.list extension
 pub fn handle_manage_list(keys: Vec<KeyInfo>) -> Result<Vec<u8>> {
-    let key_list: Vec<HashMap<String, serde_json::Value>> = keys
+    use rssh_proto::cbor::{ManagedKey, ManageListResponse};
+    
+    // Convert KeyInfo to ManagedKey
+    let managed_keys: Vec<ManagedKey> = keys
         .into_iter()
-        .map(|key| {
-            let mut map = HashMap::new();
-            map.insert(
-                "fp_sha256_hex".to_string(),
-                serde_json::Value::String(key.fingerprint),
-            );
-            map.insert("type".to_string(), serde_json::Value::String(key.key_type));
-            map.insert(
-                "description".to_string(),
-                serde_json::Value::String(key.description),
-            );
-            map.insert(
-                "source".to_string(),
-                serde_json::Value::String("internal".to_string()),
-            );
-            map.insert("loaded".to_string(), serde_json::Value::Bool(true));
-            map.insert("has_disk".to_string(), serde_json::Value::Bool(true));
-            map.insert(
-                "has_cert".to_string(),
-                serde_json::Value::Bool(key.has_cert),
-            );
-
-            // Add constraints
-            let mut constraints = HashMap::new();
-            constraints.insert("confirm".to_string(), serde_json::Value::Bool(key.confirm));
-            constraints.insert("lifetime_expires_at".to_string(), serde_json::Value::Null);
-            map.insert(
-                "constraints".to_string(),
-                serde_json::Value::Object(constraints.into_iter().map(|(k, v)| (k, v)).collect()),
-            );
-
-            map.insert("created".to_string(), serde_json::Value::Null);
-            map.insert("updated".to_string(), serde_json::Value::Null);
-
-            map
+        .map(|key| ManagedKey {
+            fingerprint: key.fingerprint,
+            key_type: key.key_type,
+            comment: key.description.clone(), // Use description as comment
+            locked: false, // Keys are not individually locked
+            last_used: None, // TODO: Track last use time
+            use_count: 0, // TODO: Track use count
+            constraints: {
+                let mut c = Vec::new();
+                if key.confirm {
+                    c.push("confirm".to_string());
+                }
+                if key.lifetime_expires_at.is_some() {
+                    c.push("lifetime".to_string());
+                }
+                c
+            },
         })
         .collect();
 
-    // Create response matching rssh_proto::cbor::ExtensionResponse structure
-    let response_data = serde_json::json!({
-        "ok": true,
-        "keys": key_list
-    });
-
-    // Convert to CBOR bytes for the data field
+    // Create ManageListResponse
+    let list_response = ManageListResponse {
+        ok: true,
+        keys: managed_keys,
+    };
+    
+    // Serialize response to CBOR for the data field
     let mut data_cbor = Vec::new();
-    ciborium::into_writer(&response_data, &mut data_cbor)
+    ciborium::into_writer(&list_response, &mut data_cbor)
         .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
-
-    // Create the ExtensionResponse that TUI expects
+    
+    // Create the ExtensionResponse wrapper
     let response = rssh_proto::cbor::ExtensionResponse {
         success: true,
         data: data_cbor,

@@ -480,19 +480,16 @@ fn load_keys(
         let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
 
         if cbor_response.success {
-            // Parse key list from CBOR data
-            #[derive(serde::Deserialize)]
-            struct KeyData {
-                fingerprint: String,
-                key_type: String,
-                comment: String,
-                locked: bool,
-                last_used: Option<u64>,
-                use_count: u64,
-                constraints: Vec<String>,
+            // Parse the ManageListResponse from CBOR data
+            use rssh_proto::cbor::{ManageListResponse, ManagedKey};
+
+            let list_response: ManageListResponse = ciborium::from_reader(&cbor_response.data[..])?;
+
+            if !list_response.ok {
+                return Err("Server returned error in manage.list response".into());
             }
 
-            let keys_data: Vec<KeyData> = ciborium::from_reader(&cbor_response.data[..])?;
+            let keys_data = list_response.keys;
 
             app.keys = keys_data
                 .into_iter()
