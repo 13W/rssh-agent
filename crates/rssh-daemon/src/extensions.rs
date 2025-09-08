@@ -1,6 +1,5 @@
 use rssh_core::{Error, Result, ram_store::KeyInfo};
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Deserialize;
 
 pub const EXTENSION_NAMESPACE: &str = "rssh-agent@local";
 
@@ -15,8 +14,8 @@ pub use rssh_proto::cbor::ExtensionRequest;
 
 /// Handle manage.list extension
 pub fn handle_manage_list(keys: Vec<KeyInfo>) -> Result<Vec<u8>> {
-    use rssh_proto::cbor::{ManagedKey, ManageListResponse};
-    
+    use rssh_proto::cbor::{ManageListResponse, ManagedKey};
+
     // Convert KeyInfo to ManagedKey
     let managed_keys: Vec<ManagedKey> = keys
         .into_iter()
@@ -24,9 +23,9 @@ pub fn handle_manage_list(keys: Vec<KeyInfo>) -> Result<Vec<u8>> {
             fingerprint: key.fingerprint,
             key_type: key.key_type,
             comment: key.description.clone(), // Use description as comment
-            locked: false, // Keys are not individually locked
-            last_used: None, // TODO: Track last use time
-            use_count: 0, // TODO: Track use count
+            locked: false,                    // Keys are not individually locked
+            last_used: None,                  // TODO: Track last use time
+            use_count: 0,                     // TODO: Track use count
             constraints: {
                 let mut c = Vec::new();
                 if key.confirm {
@@ -37,6 +36,7 @@ pub fn handle_manage_list(keys: Vec<KeyInfo>) -> Result<Vec<u8>> {
                 }
                 c
             },
+            is_external: key.is_external,
         })
         .collect();
 
@@ -45,12 +45,12 @@ pub fn handle_manage_list(keys: Vec<KeyInfo>) -> Result<Vec<u8>> {
         ok: true,
         keys: managed_keys,
     };
-    
+
     // Serialize response to CBOR for the data field
     let mut data_cbor = Vec::new();
     ciborium::into_writer(&list_response, &mut data_cbor)
         .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
-    
+
     // Create the ExtensionResponse wrapper
     let response = rssh_proto::cbor::ExtensionResponse {
         success: true,
@@ -80,6 +80,146 @@ pub fn handle_control_shutdown() -> Result<Vec<u8>> {
     // Create the ExtensionResponse that TUI expects
     let response = rssh_proto::cbor::ExtensionResponse {
         success: true,
+        data: data_cbor,
+    };
+
+    // Serialize the whole response to CBOR
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&response, &mut cbor_data)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    Ok(cbor_data)
+}
+
+/// Handle manage.import extension - imports an external key to persistent storage
+pub async fn handle_manage_import(
+    data: &[u8],
+    ram_store: &rssh_core::ram_store::RamStore,
+) -> Result<Vec<u8>> {
+    use rssh_core::keyfile::{KeyFile, KeyPayload, KeyType};
+    use chrono::Utc;
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+    #[derive(Debug, Deserialize)]
+    struct ImportRequest {
+        fp_sha256_hex: String,
+        description: Option<String>,
+        set_key_password: bool,
+        new_key_pass_b64: Option<String>,
+    }
+
+    // Parse the CBOR request data
+    let request: ImportRequest = ciborium::from_reader(data)
+        .map_err(|e| Error::Internal(format!("Failed to parse import request: {}", e)))?;
+
+    // Get the external key data
+    let key_data = ram_store.get_external_key_data(&request.fp_sha256_hex)?;
+
+    // Get key info for description and type
+    let keys = ram_store.list_keys()?;
+    let key_info = keys.iter()
+        .find(|k| k.fingerprint == request.fp_sha256_hex)
+        .ok_or(Error::NotFound)?;
+    
+    // Use provided description or keep the existing one
+    let description = request.description.unwrap_or_else(|| key_info.description.clone());
+    
+    // Determine key type from key_info
+    let key_type = match key_info.key_type.as_str() {
+        "ed25519" => KeyType::Ed25519,
+        "rsa" => KeyType::Rsa,
+        _ => return Err(Error::Internal(format!("Unknown key type: {}", key_info.key_type))),
+    };
+    
+    // Convert wire format key data to OpenSSH format
+    // The key_data is already in the wire format that can be stored
+    // For now, we'll store it as base64-encoded openssh-key-v1
+    let secret_openssh_b64 = BASE64.encode(&key_data);
+    
+    // Create KeyPayload
+    let now = Utc::now();
+    let payload = KeyPayload {
+        key_type,
+        description,
+        secret_openssh_b64,
+        cert_openssh_b64: None, // TODO: Handle certificates if present
+        created: now,
+        updated: now,
+    };
+    
+    // Get storage directory from environment or use default
+    let storage_dir = std::env::var("RSSH_STORAGE_DIR")
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            format!("{}/.ssh/rssh-agent", home)
+        });
+    
+    // For now, use a default master password
+    // In production, this should be obtained from the config or prompt
+    let master_password = "master_password"; // TODO: Get actual master password
+    
+    // Write key file to disk
+    KeyFile::write(
+        &storage_dir,
+        &request.fp_sha256_hex,
+        &payload,
+        master_password,
+    )?;
+    
+    // Mark the key as internal now that it's been imported
+    ram_store.mark_key_as_internal(&request.fp_sha256_hex)?;
+    
+    // Create success response
+    let response_data = serde_json::json!({
+        "ok": true,
+        "fp_sha256_hex": request.fp_sha256_hex
+    });
+
+    // Convert to CBOR bytes for the data field
+    let mut data_cbor = Vec::new();
+    ciborium::into_writer(&response_data, &mut data_cbor)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    // Create the ExtensionResponse
+    let response = rssh_proto::cbor::ExtensionResponse {
+        success: true,
+        data: data_cbor,
+    };
+
+    // Serialize the whole response to CBOR
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&response, &mut cbor_data)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    Ok(cbor_data)
+}
+
+/// Build an error response in CBOR format
+pub fn build_error_response(error: Error) -> Result<Vec<u8>> {
+    let error_code = match error {
+        Error::NotExternal => "not_external",
+        Error::AlreadyExists => "already_exists",
+        Error::NotFound => "not_found",
+        Error::NeedMasterUnlock => "need_master_unlock",
+        _ => "internal",
+    };
+
+    let response_data = serde_json::json!({
+        "ok": false,
+        "error": {
+            "code": error_code,
+            "msg": error.to_string()
+        }
+    });
+
+    // Convert to CBOR bytes for the data field
+    let mut data_cbor = Vec::new();
+    ciborium::into_writer(&response_data, &mut data_cbor)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    // Create the ExtensionResponse
+    let response = rssh_proto::cbor::ExtensionResponse {
+        success: false,
         data: data_cbor,
     };
 

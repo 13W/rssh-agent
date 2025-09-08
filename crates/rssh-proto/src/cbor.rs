@@ -22,6 +22,7 @@ pub struct ManagedKey {
     pub last_used: Option<u64>,
     pub use_count: u64,
     pub constraints: Vec<String>,
+    pub is_external: bool,
 }
 
 /// Response for manage.list operation

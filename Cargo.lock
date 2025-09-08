@@ -1646,6 +1646,8 @@ name = "rssh-daemon"
 version = "0.1.0"
 dependencies = [
  "atty",
+ "base64",
+ "chrono",
  "ciborium",
  "ed25519-dalek",
  "hex",

@@ -29,6 +29,7 @@ struct EncryptedKey {
     has_cert: bool,
     confirm: bool,
     lifetime_expires_at: Option<Instant>,
+    is_external: bool, // true if added via ssh-add, false if managed by rssh-agent
     #[allow(dead_code)]
     created: Instant,
 }
@@ -129,6 +130,38 @@ impl RamStore {
         key_type: String,
         has_cert: bool,
     ) -> Result<()> {
+        self.load_key_internal(
+            fingerprint,
+            key_data,
+            description,
+            key_type,
+            has_cert,
+            false,
+        )
+    }
+
+    /// Load an external key (from ssh-add) into RAM
+    pub fn load_external_key(
+        &self,
+        fingerprint: &str,
+        key_data: &[u8],
+        description: String,
+        key_type: String,
+        has_cert: bool,
+    ) -> Result<()> {
+        self.load_key_internal(fingerprint, key_data, description, key_type, has_cert, true)
+    }
+
+    /// Internal method to load a key with external flag
+    fn load_key_internal(
+        &self,
+        fingerprint: &str,
+        key_data: &[u8],
+        description: String,
+        key_type: String,
+        has_cert: bool,
+        is_external: bool,
+    ) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
 
         // Check if unlocked
@@ -166,6 +199,7 @@ impl RamStore {
             has_cert,
             confirm: false,
             lifetime_expires_at: None,
+            is_external,
             created: Instant::now(),
         };
 
@@ -210,11 +244,56 @@ impl RamStore {
                     has_cert: key.has_cert,
                     confirm: key.confirm,
                     lifetime_expires_at: key.lifetime_expires_at,
+                    is_external: key.is_external,
                 });
             }
         }
 
         Ok(keys)
+    }
+
+    /// Get raw key data for an external key (for importing)
+    pub fn get_external_key_data(&self, fingerprint: &str) -> Result<Vec<u8>> {
+        let inner = self.inner.read().unwrap();
+
+        // Check if unlocked
+        let mem_key = inner.mem_key.as_ref().ok_or(Error::NeedMasterUnlock)?;
+
+        // Find the key
+        let encrypted_key = inner.keys.get(fingerprint).ok_or(Error::NotFound)?;
+
+        // Check if it's external
+        if !encrypted_key.is_external {
+            return Err(Error::NotExternal);
+        }
+
+        // Decrypt the key data
+        let cipher = XChaCha20Poly1305::new_from_slice(&mem_key.key)
+            .map_err(|e| Error::Crypto(e.to_string()))?;
+        let nonce = XNonce::from_slice(&encrypted_key.nonce);
+
+        cipher
+            .decrypt(nonce, encrypted_key.ciphertext.as_ref())
+            .map_err(|e| Error::Crypto(e.to_string()))
+    }
+
+    /// Mark a key as internal (no longer external) after importing
+    pub fn mark_key_as_internal(&self, fingerprint: &str) -> Result<()> {
+        let mut inner = self.inner.write().unwrap();
+
+        // Check if unlocked
+        if inner.mem_key.is_none() {
+            return Err(Error::NeedMasterUnlock);
+        }
+
+        // Find and update the key
+        match inner.keys.get_mut(fingerprint) {
+            Some(key) => {
+                key.is_external = false;
+                Ok(())
+            }
+            None => Err(Error::NotFound),
+        }
     }
 
     /// Decrypt a key temporarily for signing
@@ -316,6 +395,7 @@ pub struct KeyInfo {
     pub has_cert: bool,
     pub confirm: bool,
     pub lifetime_expires_at: Option<Instant>,
+    pub is_external: bool,
 }
 
 fn derive_mem_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {

@@ -23,6 +23,7 @@ pub struct KeyInfo {
     pub last_used: Option<SystemTime>,
     pub use_count: u64,
     pub constraints: Vec<String>,
+    pub is_external: bool,
 }
 
 pub struct App {
@@ -198,6 +199,27 @@ fn run_app<B: Backend>(
                         KeyCode::Char('a') => {
                             app.set_status("Use ssh-add to add keys".to_string());
                         }
+                        KeyCode::Char('i') => {
+                            // Import selected external key
+                            if let Some(idx) = app.selected_key {
+                                if idx < app.keys.len() {
+                                    let key = &app.keys[idx];
+                                    // Check if key is external (can be imported)
+                                    if !key.is_external {
+                                        app.set_status("Only external keys (added via ssh-add) can be imported".to_string());
+                                    } else if let Err(e) =
+                                        import_key(socket_path.as_ref(), &key.fingerprint)
+                                    {
+                                        app.set_status(format!("Failed to import key: {}", e));
+                                    } else {
+                                        app.set_status("Key imported successfully".to_string());
+                                        if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                            app.set_status(format!("Failed to refresh: {}", e));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     },
                     InputMode::Password => match key.code {
@@ -272,7 +294,7 @@ fn ui(f: &mut Frame, app: &App) {
             ]
             .as_ref(),
         )
-        .split(f.size());
+        .split(f.area());
 
     // Title
     let title = Paragraph::new("rssh-agent Key Manager")
@@ -318,6 +340,10 @@ fn ui(f: &mut Frame, app: &App) {
                 Span::raw("      Add key (hint)"),
             ]),
             Line::from(vec![
+                Span::styled("i", Style::default().fg(Color::Yellow)),
+                Span::raw("      Import external key to storage"),
+            ]),
+            Line::from(vec![
                 Span::styled("h/?", Style::default().fg(Color::Yellow)),
                 Span::raw("    Toggle this help"),
             ]),
@@ -341,6 +367,15 @@ fn ui(f: &mut Frame, app: &App) {
                         format!("{} ", if key.locked { "🔒" } else { "🔓" }),
                         Style::default(),
                     ),
+                    Span::styled(
+                        if key.is_external { "[EXT]" } else { "[INT]" },
+                        Style::default().fg(if key.is_external {
+                            Color::Cyan
+                        } else {
+                            Color::Gray
+                        }),
+                    ),
+                    Span::raw(" "),
                     Span::styled(&key.key_type, Style::default().fg(Color::Green)),
                     Span::raw(" "),
                 ];
@@ -481,7 +516,7 @@ fn load_keys(
 
         if cbor_response.success {
             // Parse the ManageListResponse from CBOR data
-            use rssh_proto::cbor::{ManageListResponse, ManagedKey};
+            use rssh_proto::cbor::ManageListResponse;
 
             let list_response: ManageListResponse = ciborium::from_reader(&cbor_response.data[..])?;
 
@@ -503,6 +538,7 @@ fn load_keys(
                         .map(|ts| SystemTime::UNIX_EPOCH + Duration::from_secs(ts)),
                     use_count: k.use_count,
                     constraints: k.constraints,
+                    is_external: k.is_external,
                 })
                 .collect();
 
@@ -606,4 +642,89 @@ fn remove_key(
     // This would use SSH_AGENTC_REMOVE_IDENTITY
     // For now, return an error since we need the actual key blob
     Err("Key removal requires the original key blob (use ssh-add -d)".into())
+}
+
+fn import_key(
+    socket_path: Option<&String>,
+    fingerprint: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = socket_path
+        .map(|s| s.clone())
+        .or_else(|| std::env::var("SSH_AUTH_SOCK").ok())
+        .ok_or("No socket path available")?;
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(&socket)?;
+
+    // Build CBOR request for manage.import
+    use rssh_proto::cbor::ExtensionRequest;
+    let import_data = {
+        #[derive(serde::Serialize)]
+        struct ImportRequest {
+            fp_sha256_hex: String,
+            set_key_password: bool,
+            new_key_pass_b64: Option<String>,
+        }
+
+        let req = ImportRequest {
+            fp_sha256_hex: fingerprint.to_string(),
+            set_key_password: false,
+            new_key_pass_b64: None,
+        };
+
+        let mut data = Vec::new();
+        ciborium::into_writer(&req, &mut data)?;
+        data
+    };
+
+    let import_request = ExtensionRequest {
+        extension: "manage.import".to_string(),
+        data: import_data,
+    };
+
+    // Serialize request to CBOR
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&import_request, &mut cbor_data)?;
+
+    // Build extension message
+    let mut message = Vec::new();
+    let ext_name = "rssh-agent@local";
+
+    // Message length (type + name_len + name + cbor)
+    let total_len = 1 + 4 + ext_name.len() + cbor_data.len();
+    message.extend_from_slice(&(total_len as u32).to_be_bytes());
+
+    // Message type: SSH_AGENTC_EXTENSION (27)
+    message.push(27);
+
+    // Extension name
+    message.extend_from_slice(&(ext_name.len() as u32).to_be_bytes());
+    message.extend_from_slice(ext_name.as_bytes());
+
+    // CBOR data
+    message.extend_from_slice(&cbor_data);
+
+    // Send request
+    stream.write_all(&message)?;
+
+    // Read response length
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let response_len = u32::from_be_bytes(len_buf) as usize;
+
+    // Read response
+    let mut response = vec![0u8; response_len];
+    stream.read_exact(&mut response)?;
+
+    // Check response type
+    if response[0] != rssh_proto::messages::SSH_AGENT_SUCCESS {
+        return Err("Import failed".into());
+    }
+
+    // Parse CBOR response if needed
+    // For now, just return success if we got SSH_AGENT_SUCCESS
+
+    Ok(())
 }

@@ -159,8 +159,8 @@ impl Agent {
                 }
             };
 
-        // Add to RAM store
-        match self.ram_store.load_key(
+        // Add to RAM store as external key (added via ssh-add)
+        match self.ram_store.load_external_key(
             &fingerprint,
             &identity.private_key_data,
             identity.comment,
@@ -326,6 +326,21 @@ impl Agent {
                     Err(e) => {
                         tracing::error!("Failed to handle control.shutdown: {}", e);
                         Ok(messages::build_failure())
+                    }
+                }
+            }
+            "manage.import" => {
+                tracing::info!("Received import request via extension");
+                // Parse CBOR data to get fingerprint and other params
+                match extensions::handle_manage_import(&request.data, &self.ram_store).await {
+                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                    Err(e) => {
+                        tracing::error!("Failed to handle manage.import: {}", e);
+                        // Return error in CBOR format
+                        match extensions::build_error_response(e) {
+                            Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                            Err(_) => Ok(messages::build_failure()),
+                        }
                     }
                 }
             }
