@@ -126,81 +126,100 @@ impl KeyFile {
     }
 
     /// Read and decrypt a key file from disk
-    pub fn read<P: AsRef<Path>>(
-        storage_dir: P,
-        fingerprint_hex: &str,
-        master_password: &str,
-    ) -> Result<KeyPayload> {
-        validate_fingerprint_format(fingerprint_hex)?;
+pub fn read<P: AsRef<Path>>(
+    storage_dir: P,
+    fingerprint_hex: &str,
+    master_password: &str,
+) -> Result<KeyPayload> {
+    validate_fingerprint_format(fingerprint_hex)?;
 
-        let filename = format!("sha256-{}.json", fingerprint_hex);
-        let filepath = storage_dir.as_ref().join(filename);
+    let filename = format!("sha256-{}.json", fingerprint_hex);
+    let filepath = storage_dir.as_ref().join(filename);
 
-        let json = std::fs::read_to_string(&filepath)?;
-        let keyfile: KeyFile = serde_json::from_str(&json)?;
+    let json = std::fs::read_to_string(&filepath)?;
+    let keyfile: KeyFile = serde_json::from_str(&json)?;
 
-        if keyfile.version != "rssh-keyfile/v1" {
-            return Err(Error::Config(format!(
-                "Unsupported keyfile version: {}",
-                keyfile.version
-            )));
-        }
-
-        if keyfile.kdf.name != "argon2id" {
-            return Err(Error::Config(format!(
-                "Unsupported KDF: {}",
-                keyfile.kdf.name
-            )));
-        }
-
-        if keyfile.aead.name != "xchacha20poly1305" {
-            return Err(Error::Config(format!(
-                "Unsupported AEAD: {}",
-                keyfile.aead.name
-            )));
-        }
-
-        // Decode base64
-        let salt = BASE64
-            .decode(&keyfile.kdf.salt_b64)
-            .map_err(|e| Error::Config(e.to_string()))?;
-        let nonce_bytes = BASE64
-            .decode(&keyfile.aead.nonce_b64)
-            .map_err(|e| Error::Config(e.to_string()))?;
-        let ciphertext = BASE64
-            .decode(&keyfile.ciphertext_b64)
-            .map_err(|e| Error::Config(e.to_string()))?;
-
-        if nonce_bytes.len() != 24 {
-            return Err(Error::Config("Invalid nonce length".into()));
-        }
-
-        // Derive key
-        let key = derive_key(
-            master_password,
-            &salt,
-            keyfile.kdf.mib,
-            keyfile.kdf.t,
-            keyfile.kdf.p,
-        )?;
-
-        // Decrypt
-        let cipher =
-            XChaCha20Poly1305::new_from_slice(&key.0).map_err(|e| Error::Crypto(e.to_string()))?;
-        let nonce = XNonce::from_slice(&nonce_bytes);
-        let plaintext = cipher
-            .decrypt(nonce, ciphertext.as_ref())
-            .map_err(|_| Error::WrongPassword)?;
-
-        // Parse payload
-        let payload: KeyPayload = serde_json::from_slice(&plaintext)?;
-        validate_description(&payload.description)?;
-
-        // TODO: Verify fingerprint matches the public key in secret_openssh_b64
-        // This will be done when we implement openssh-key-v1 parsing
-
-        Ok(payload)
+    if keyfile.version != "rssh-keyfile/v1" {
+        return Err(Error::Config(format!(
+            "Unsupported keyfile version: {}",
+            keyfile.version
+        )));
     }
+
+    if keyfile.kdf.name != "argon2id" {
+        return Err(Error::Config(format!(
+            "Unsupported KDF: {}",
+            keyfile.kdf.name
+        )));
+    }
+
+    if keyfile.aead.name != "xchacha20poly1305" {
+        return Err(Error::Config(format!(
+            "Unsupported AEAD: {}",
+            keyfile.aead.name
+        )));
+    }
+
+    // Decode base64
+    let salt = BASE64
+        .decode(&keyfile.kdf.salt_b64)
+        .map_err(|e| Error::Config(e.to_string()))?;
+    let nonce_bytes = BASE64
+        .decode(&keyfile.aead.nonce_b64)
+        .map_err(|e| Error::Config(e.to_string()))?;
+    let ciphertext = BASE64
+        .decode(&keyfile.ciphertext_b64)
+        .map_err(|e| Error::Config(e.to_string()))?;
+
+    if nonce_bytes.len() != 24 {
+        return Err(Error::Config("Invalid nonce length".into()));
+    }
+
+    // Derive key
+    let key = derive_key(
+        master_password,
+        &salt,
+        keyfile.kdf.mib,
+        keyfile.kdf.t,
+        keyfile.kdf.p,
+    )?;
+
+    // Decrypt
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(&key.0).map_err(|e| Error::Crypto(e.to_string()))?;
+    let nonce = XNonce::from_slice(&nonce_bytes);
+    let plaintext = cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|_| Error::WrongPassword)?;
+
+    // Parse payload
+    let payload: KeyPayload = serde_json::from_slice(&plaintext)?;
+    validate_description(&payload.description)?;
+
+    // Verify fingerprint matches the public key in secret_openssh_b64
+    use crate::openssh::SshPrivateKey;
+    
+    let key_data = BASE64
+        .decode(&payload.secret_openssh_b64)
+        .map_err(|e| Error::Config(format!("Invalid base64 in secret key: {}", e)))?;
+    
+    // Parse the OpenSSH private key to extract public key
+    let ssh_key = SshPrivateKey::from_openssh(&key_data, None)
+        .map_err(|e| Error::Config(format!("Failed to parse SSH key: {:?}", e)))?;
+    
+    // Calculate fingerprint from public key and verify it matches
+    let public_key_bytes = ssh_key.public_key_bytes();
+    let calculated_fingerprint = calculate_fingerprint_hex(&public_key_bytes);
+    
+    if calculated_fingerprint != fingerprint_hex {
+        return Err(Error::Config(format!(
+            "Fingerprint mismatch: expected {}, calculated {}",
+            fingerprint_hex, calculated_fingerprint
+        )));
+    }
+
+    Ok(payload)
+}
 
     /// Read metadata from a key file without loading the secret key data
     pub fn read_metadata<P: AsRef<Path>>(
@@ -293,49 +312,65 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_keyfile_roundtrip() {
-        let temp = TempDir::new().unwrap();
-        let fingerprint = "a".repeat(64);
-        let payload = KeyPayload {
-            key_type: KeyType::Ed25519,
-            description: "test key".to_string(),
-            secret_openssh_b64: BASE64.encode(b"fake key data"),
-            cert_openssh_b64: None,
-            created: Utc::now(),
-            updated: Utc::now(),
-        };
+fn test_keyfile_roundtrip() {
+    use crate::openssh::SshPrivateKey;
+    
+    let temp = TempDir::new().unwrap();
+    
+    // Generate a real SSH key
+    let ssh_key = SshPrivateKey::generate_ed25519().unwrap();
+    let key_bytes = ssh_key.to_openssh(None, None).unwrap();
+    let public_key_bytes = ssh_key.public_key_bytes();
+    let fingerprint = calculate_fingerprint_hex(&public_key_bytes);
+    
+    let payload = KeyPayload {
+        key_type: KeyType::Ed25519,
+        description: "test key".to_string(),
+        secret_openssh_b64: BASE64.encode(&key_bytes),
+        cert_openssh_b64: None,
+        created: Utc::now(),
+        updated: Utc::now(),
+    };
 
-        let password = "test_password_123";
+    let password = "test_password_123";
 
-        // Write
-        KeyFile::write(temp.path(), &fingerprint, &payload, password).unwrap();
+    // Write
+    KeyFile::write(temp.path(), &fingerprint, &payload, password).unwrap();
 
-        // Read back
-        let read_payload = KeyFile::read(temp.path(), &fingerprint, password).unwrap();
+    // Read back
+    let read_payload = KeyFile::read(temp.path(), &fingerprint, password).unwrap();
 
-        assert_eq!(read_payload.key_type, payload.key_type);
-        assert_eq!(read_payload.description, payload.description);
-        assert_eq!(read_payload.secret_openssh_b64, payload.secret_openssh_b64);
-    }
+    assert_eq!(read_payload.key_type, payload.key_type);
+    assert_eq!(read_payload.description, payload.description);
+    assert_eq!(read_payload.secret_openssh_b64, payload.secret_openssh_b64);
+}
 
     #[test]
-    fn test_wrong_password() {
-        let temp = TempDir::new().unwrap();
-        let fingerprint = "b".repeat(64);
-        let payload = KeyPayload {
-            key_type: KeyType::Rsa,
-            description: "test rsa".to_string(),
-            secret_openssh_b64: BASE64.encode(b"fake rsa key"),
-            cert_openssh_b64: Some(BASE64.encode(b"fake cert")),
-            created: Utc::now(),
-            updated: Utc::now(),
-        };
+fn test_wrong_password() {
+    use crate::openssh::SshPrivateKey;
+    
+    let temp = TempDir::new().unwrap();
+    
+    // Generate a real RSA SSH key
+    let ssh_key = SshPrivateKey::generate_rsa(2048).unwrap();
+    let key_bytes = ssh_key.to_openssh(None, None).unwrap();
+    let public_key_bytes = ssh_key.public_key_bytes();
+    let fingerprint = calculate_fingerprint_hex(&public_key_bytes);
+    
+    let payload = KeyPayload {
+        key_type: KeyType::Rsa,
+        description: "test rsa".to_string(),
+        secret_openssh_b64: BASE64.encode(&key_bytes),
+        cert_openssh_b64: Some(BASE64.encode(b"fake cert")),
+        created: Utc::now(),
+        updated: Utc::now(),
+    };
 
-        KeyFile::write(temp.path(), &fingerprint, &payload, "correct_password").unwrap();
+    KeyFile::write(temp.path(), &fingerprint, &payload, "correct_password").unwrap();
 
-        let result = KeyFile::read(temp.path(), &fingerprint, "wrong_password");
-        assert!(matches!(result, Err(Error::WrongPassword)));
-    }
+    let result = KeyFile::read(temp.path(), &fingerprint, "wrong_password");
+    assert!(matches!(result, Err(Error::WrongPassword)));
+}
 
     #[test]
     fn test_validate_description() {
