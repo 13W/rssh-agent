@@ -340,6 +340,25 @@ impl Agent {
                     }
                 }
             }
+            "manage.load" => {
+                // Handle load request
+                match extensions::handle_manage_load(
+                    &request.data,
+                    &self.ram_store,
+                    self.storage_dir.as_deref(),
+                )
+                .await
+                {
+                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                    Err(e) => {
+                        tracing::error!("Failed to handle manage.load: {}", e);
+                        match extensions::build_error_response(e) {
+                            Ok(error_cbor) => Ok(extensions::build_extension_response(error_cbor)),
+                            Err(_) => Ok(messages::build_failure()),
+                        }
+                    }
+                }
+            }
             "manage.import" => {
                 tracing::info!("Received import request via extension");
                 // Parse CBOR data to get fingerprint and other params

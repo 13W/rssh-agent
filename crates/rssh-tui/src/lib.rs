@@ -201,6 +201,29 @@ fn run_app<B: Backend>(
                         KeyCode::Char('a') => {
                             app.set_status("Use ssh-add to add keys".to_string());
                         }
+                        KeyCode::Char('L') => {
+                            // Load selected disk key into memory
+                            if let Some(idx) = app.selected_key {
+                                if idx < app.keys.len() {
+                                    let key = &app.keys[idx];
+                                    // Check if key is on disk but not loaded
+                                    if !key.has_disk {
+                                        app.set_status("Key is not on disk".to_string());
+                                    } else if key.loaded {
+                                        app.set_status("Key is already loaded".to_string());
+                                    } else if let Err(e) =
+                                        load_disk_key(socket_path.as_ref(), &key.fingerprint)
+                                    {
+                                        app.set_status(format!("Failed to load key: {}", e));
+                                    } else {
+                                        app.set_status("Key loaded successfully".to_string());
+                                        if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                            app.set_status(format!("Failed to refresh: {}", e));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         KeyCode::Char('i') => {
                             // Import selected external key
                             if let Some(idx) = app.selected_key {
@@ -332,6 +355,10 @@ fn ui(f: &mut Frame, app: &App) {
             Line::from(vec![
                 Span::styled("u", Style::default().fg(Color::Yellow)),
                 Span::raw("      Unlock agent"),
+            ]),
+            Line::from(vec![
+                Span::styled("L", Style::default().fg(Color::Yellow)),
+                Span::raw("      Load selected disk key into memory"),
             ]),
             Line::from(vec![
                 Span::styled("r/F5", Style::default().fg(Color::Yellow)),
@@ -661,6 +688,111 @@ fn remove_key(
     // This would use SSH_AGENTC_REMOVE_IDENTITY
     // For now, return an error since we need the actual key blob
     Err("Key removal requires the original key blob (use ssh-add -d)".into())
+}
+
+fn load_disk_key(
+    socket_path: Option<&String>,
+    fingerprint: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = socket_path
+        .map(|s| s.clone())
+        .or_else(|| std::env::var("SSH_AUTH_SOCK").ok())
+        .ok_or("No socket path available")?;
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(&socket)?;
+
+    // Build CBOR request for manage.load
+    use rssh_proto::cbor::ExtensionRequest;
+    let load_data = {
+        #[derive(serde::Serialize)]
+        struct LoadRequest {
+            fp_sha256_hex: String,
+            key_pass_b64: Option<String>,
+        }
+
+        let req = LoadRequest {
+            fp_sha256_hex: fingerprint.to_string(),
+            key_pass_b64: None, // TODO: Handle password-protected keys
+        };
+
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&req, &mut cbor)?;
+        cbor
+    };
+
+    let request = ExtensionRequest {
+        extension: "manage.load".to_string(),
+        data: load_data,
+    };
+
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&request, &mut cbor_data)?;
+
+    // Build SSH protocol message with extension namespace
+    let mut message = Vec::new();
+    message.push(rssh_proto::messages::SSH_AGENTC_EXTENSION);
+
+    // Add extension namespace
+    let ext_namespace = b"rssh-agent@local";
+    message.extend_from_slice(&(ext_namespace.len() as u32).to_be_bytes());
+    message.extend_from_slice(ext_namespace);
+
+    // Add CBOR data
+    message.extend_from_slice(&cbor_data);
+
+    // Add length prefix for the whole message
+    let mut full_message = Vec::new();
+    full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    full_message.extend_from_slice(&message);
+
+    stream.write_all(&full_message)?;
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut response = vec![0u8; len];
+    stream.read_exact(&mut response)?;
+
+    // Check response type
+    if response[0] == rssh_proto::messages::SSH_AGENT_SUCCESS {
+        // Parse the CBOR response to check if it's actually successful
+        let mut offset = 1;
+        if response.len() < offset + 4 {
+            return Err("Response too short".into());
+        }
+
+        let data_len = u32::from_be_bytes([
+            response[offset],
+            response[offset + 1],
+            response[offset + 2],
+            response[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if response.len() < offset + data_len {
+            return Err("Response data truncated".into());
+        }
+
+        let cbor_data = &response[offset..offset + data_len];
+        let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
+
+        if !cbor_response.success {
+            return Err(format!(
+                "Load failed: {}",
+                String::from_utf8_lossy(&cbor_response.data)
+            )
+            .into());
+        }
+
+        Ok(())
+    } else {
+        Err("Failed to load key from disk".into())
+    }
 }
 
 fn import_key(

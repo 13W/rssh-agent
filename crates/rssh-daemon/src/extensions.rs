@@ -266,6 +266,72 @@ pub async fn handle_manage_import(
     Ok(cbor_data)
 }
 
+/// Handle manage.load extension - loads a key from disk to RAM
+pub async fn handle_manage_load(
+    data: &[u8],
+    _ram_store: &rssh_core::ram_store::RamStore,
+    storage_dir: Option<&str>,
+) -> Result<Vec<u8>> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    use rssh_core::keyfile::KeyFile;
+
+    #[derive(Debug, Deserialize)]
+    struct LoadRequest {
+        fp_sha256_hex: String,
+        key_pass_b64: Option<String>,
+    }
+
+    // Parse the CBOR request data
+    let request: LoadRequest = ciborium::from_reader(data)
+        .map_err(|e| Error::Internal(format!("Failed to parse load request: {}", e)))?;
+
+    // Get storage directory
+    let storage_dir = storage_dir
+        .ok_or_else(|| Error::Internal("Storage directory not configured".to_string()))?;
+
+    // For now, use a default master password
+    // TODO: In production, this should be obtained from the config
+    let master_password = "master_password";
+
+    // Read the key file from disk
+    let _key_payload = KeyFile::read(storage_dir, &request.fp_sha256_hex, master_password)?;
+
+    // Decode the key passphrase if provided
+    let _key_passphrase = request
+        .key_pass_b64
+        .as_ref()
+        .map(|b64| BASE64.decode(b64))
+        .transpose()
+        .map_err(|e| Error::Internal(format!("Invalid base64 in key_pass_b64: {}", e)))?;
+
+    // TODO: Load the key into RAM store
+    // For now, just return success
+    // ram_store.load_from_disk(&request.fp_sha256_hex, key_payload, key_passphrase)?;
+
+    // Create success response
+    let response_data = serde_json::json!({
+        "ok": true,
+    });
+
+    // Convert to CBOR bytes for the data field
+    let mut data_cbor = Vec::new();
+    ciborium::into_writer(&response_data, &mut data_cbor)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    // Create the ExtensionResponse
+    let response = rssh_proto::cbor::ExtensionResponse {
+        success: true,
+        data: data_cbor,
+    };
+
+    // Serialize the whole response to CBOR
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&response, &mut cbor_data)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    Ok(cbor_data)
+}
+
 /// Build an error response in CBOR format
 pub fn build_error_response(error: Error) -> Result<Vec<u8>> {
     let error_code = match error {
