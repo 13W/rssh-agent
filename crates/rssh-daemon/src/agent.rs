@@ -223,9 +223,52 @@ impl Agent {
             identity.lifetime_secs()
         );
 
-        // TODO: Parse the key and add to RAM store with constraints
+        // Parse the wire format key to get fingerprint and key type
+        use crate::key_utils;
 
-        Ok(messages::build_success())
+        let (fingerprint, key_type, _pub_key_blob) =
+            match key_utils::parse_wire_key(&identity.private_key_data) {
+                Ok(info) => info,
+                Err(e) => {
+                    tracing::warn!("Failed to parse key: {}", e);
+                    return Ok(messages::build_failure());
+                }
+            };
+
+        // Get constraint values before moving identity
+        let confirm = identity.has_confirm();
+        let lifetime_secs = identity.lifetime_secs().map(|secs| secs as u64);
+        
+        // Add to RAM store as external key (added via ssh-add)
+        match self.ram_store.load_external_key(
+            &fingerprint,
+            &identity.private_key_data,
+            identity.comment,
+            key_type,
+            false, // has_cert
+        ) {
+            Ok(_) => {
+                tracing::info!("Added key with fingerprint: {}", fingerprint);
+                
+                // Set constraints if any were specified
+                
+                if confirm || lifetime_secs.is_some() {
+                    if let Err(e) = self.ram_store.set_constraints(&fingerprint, confirm, lifetime_secs) {
+                        tracing::warn!("Failed to set constraints for key {}: {}", fingerprint, e);
+                        // Key was added successfully, but constraints failed - this is not fatal
+                    } else {
+                        tracing::debug!("Set constraints for key {}: confirm={}, lifetime={:?}", 
+                                      fingerprint, confirm, lifetime_secs);
+                    }
+                }
+                
+                return Ok(messages::build_success());
+            }
+            Err(e) => {
+                tracing::warn!("Failed to add key: {}", e);
+                return Ok(messages::build_failure());
+            }
+        }
     }
 
     async fn handle_remove_identity(&self, message: &[u8]) -> Result<Vec<u8>> {
