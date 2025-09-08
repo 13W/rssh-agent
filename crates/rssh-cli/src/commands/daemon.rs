@@ -11,10 +11,11 @@ impl DaemonCommand {
         fish: bool,
         socket: Option<String>,
         foreground: bool,
+        require_mlock: bool,
         storage_dir: Option<String>,
     ) -> Result<()> {
         // Apply security hardening
-        apply_hardening()?;
+        apply_hardening(require_mlock)?;
 
         // Determine storage directory
         let storage_dir = resolve_storage_dir(storage_dir)?;

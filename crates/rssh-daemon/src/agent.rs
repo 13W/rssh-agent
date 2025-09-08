@@ -297,7 +297,7 @@ impl Agent {
         };
 
         // Handle different extension operations
-        match request.op.as_str() {
+        match request.extension.as_str() {
             "manage.list" => {
                 // Get list of keys
                 let keys = match self.ram_store.list_keys() {
@@ -330,7 +330,7 @@ impl Agent {
                 }
             }
             _ => {
-                tracing::warn!("Unknown extension operation: {}", request.op);
+                tracing::warn!("Unknown extension operation: {}", request.extension);
                 Ok(messages::build_failure())
             }
         }

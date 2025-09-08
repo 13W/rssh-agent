@@ -67,6 +67,10 @@ enum Commands {
         /// Run in foreground
         #[arg(short = 'F', long)]
         foreground: bool,
+
+        /// Require memory locking (fail if mlockall fails)
+        #[arg(long)]
+        require_mlock: bool,
     },
     /// Lock the agent
     Lock,
@@ -137,11 +141,18 @@ fn main() -> ExitCode {
             fish,
             socket,
             foreground,
+            require_mlock,
         }) => {
             // Create a runtime for async operations
             let rt = tokio::runtime::Runtime::new().unwrap();
             rt.block_on(commands::DaemonCommand::execute(
-                sh, csh, fish, socket, foreground, cli.dir,
+                sh,
+                csh,
+                fish,
+                socket,
+                foreground,
+                require_mlock,
+                cli.dir,
             ))
         }
         Some(Commands::Lock) => commands::LockCommand::execute(cli.socket),

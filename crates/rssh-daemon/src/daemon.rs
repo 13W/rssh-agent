@@ -56,20 +56,23 @@ impl ShellStyle {
 
 /// Run the daemon
 pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -> Result<()> {
-    // Check if SSH_AUTH_SOCK points to a live agent
-    if let Ok(existing_sock) = std::env::var("SSH_AUTH_SOCK") {
-        if check_socket_alive(&existing_sock).await {
-            return Err(Error::AlreadyRunning);
-        }
-    }
-
     // Create the agent
     let agent = Arc::new(Agent::new());
 
     // Create the socket server
     let server = if let Some(socket_path) = config.socket_path {
+        // If explicit socket path is provided, check if it's alive
+        if check_socket_alive(&socket_path).await {
+            return Err(Error::AlreadyInUse);
+        }
         SocketServer::new(socket_path.into(), agent.clone())
     } else {
+        // No explicit socket path, check SSH_AUTH_SOCK
+        if let Ok(existing_sock) = std::env::var("SSH_AUTH_SOCK") {
+            if check_socket_alive(&existing_sock).await {
+                return Err(Error::AlreadyRunning);
+            }
+        }
         SocketServer::create_temp_socket(agent.clone())?
     };
 
@@ -174,33 +177,41 @@ async fn check_socket_alive(socket_path: &str) -> bool {
 }
 
 /// Apply security hardening
-pub fn apply_hardening() -> Result<()> {
+pub fn apply_hardening(require_mlock: bool) -> Result<()> {
     use nix::sys::mman::{MlockAllFlags, mlockall};
     use nix::sys::resource::{Resource, setrlimit};
 
     // Disable core dumps
     setrlimit(Resource::RLIMIT_CORE, 0, 0).map_err(|e| Error::Io(e.into()))?;
 
-    // Lock all memory - warn but don't fail in development
-    // In development/testing environments, memory locking often fails due to limits
-    // Set RSSH_ALLOW_NO_MLOCK=1 or run in debug mode to continue anyway
+    // Try to lock all current and future memory pages
+    // Note: This requires sufficient memlock limits (check with `ulimit -l`)
+    // Typical Rust binaries have large virtual memory due to thread stacks (1GB+)
     if let Err(e) = mlockall(MlockAllFlags::MCL_CURRENT | MlockAllFlags::MCL_FUTURE) {
-        #[cfg(debug_assertions)]
-        {
-            tracing::warn!("Failed to lock memory in debug mode (continuing): {}", e);
+        if require_mlock {
+            // User explicitly requested strict memory locking
+            tracing::error!(
+                "Failed to lock memory: {}. \n\
+                To fix this, increase your memory lock limit:\n\
+                  Temporary: ulimit -l unlimited\n\
+                  Permanent: Add to /etc/security/limits.conf:\n\
+                    * soft memlock unlimited\n\
+                    * hard memlock unlimited\n\
+                Or run without --require-mlock flag",
+                e
+            );
+            return Err(Error::Io(e.into()));
+        } else {
+            // Default behavior: warn but continue
+            tracing::warn!(
+                "Memory locking failed ({}), continuing without it. \
+                Keys are still encrypted in RAM. \
+                Use --require-mlock to enforce memory locking.",
+                e
+            );
         }
-        #[cfg(not(debug_assertions))]
-        {
-            if std::env::var("RSSH_ALLOW_NO_MLOCK").is_ok() {
-                tracing::warn!(
-                    "Failed to lock memory (RSSH_ALLOW_NO_MLOCK set, continuing): {}",
-                    e
-                );
-            } else {
-                tracing::error!("Failed to lock memory: {}", e);
-                return Err(Error::Io(e.into()));
-            }
-        }
+    } else {
+        tracing::info!("Memory locked successfully");
     }
 
     // Set process as non-dumpable
@@ -213,7 +224,6 @@ pub fn apply_hardening() -> Result<()> {
                 // Allow continuing with a warning as it's not critical for testing
                 tracing::warn!("Failed to set PR_SET_DUMPABLE (continuing): {}", err);
             }
-
             if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1) != 0 {
                 let err = std::io::Error::last_os_error();
                 // PR_SET_NO_NEW_PRIVS may fail in containers or restricted environments

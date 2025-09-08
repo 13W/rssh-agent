@@ -428,13 +428,24 @@ fn load_keys(
     let mut cbor_data = Vec::new();
     ciborium::into_writer(&request, &mut cbor_data)?;
 
-    // Build SSH protocol message
+    // Build SSH protocol message with extension namespace
     let mut message = Vec::new();
-    message.extend_from_slice(&(cbor_data.len() as u32 + 1).to_be_bytes());
     message.push(rssh_proto::messages::SSH_AGENTC_EXTENSION);
+
+    // Add extension namespace
+    let ext_namespace = b"rssh-agent@local";
+    message.extend_from_slice(&(ext_namespace.len() as u32).to_be_bytes());
+    message.extend_from_slice(ext_namespace);
+
+    // Add CBOR data
     message.extend_from_slice(&cbor_data);
 
-    stream.write_all(&message)?;
+    // Add length prefix for the whole message
+    let mut full_message = Vec::new();
+    full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    full_message.extend_from_slice(&message);
+
+    stream.write_all(&full_message)?;
 
     // Read response
     let mut len_buf = [0u8; 4];
@@ -444,10 +455,29 @@ fn load_keys(
     let mut response = vec![0u8; len];
     stream.read_exact(&mut response)?;
 
-    if response[0] == rssh_proto::messages::SSH_AGENT_EXTENSION_RESPONSE {
-        // Parse CBOR response
-        let cbor_response: rssh_proto::cbor::ExtensionResponse =
-            ciborium::from_reader(&response[1..])?;
+    // The daemon returns SSH_AGENT_SUCCESS (6) with wire-encoded CBOR data
+    if response[0] == rssh_proto::messages::SSH_AGENT_SUCCESS {
+        // Skip message type and read wire-encoded string length
+        let mut offset = 1;
+        if response.len() < offset + 4 {
+            return Err("Response too short".into());
+        }
+
+        let data_len = u32::from_be_bytes([
+            response[offset],
+            response[offset + 1],
+            response[offset + 2],
+            response[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if response.len() < offset + data_len {
+            return Err("Response data truncated".into());
+        }
+
+        // Parse CBOR response from the wire-encoded string
+        let cbor_data = &response[offset..offset + data_len];
+        let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
 
         if cbor_response.success {
             // Parse key list from CBOR data
@@ -491,11 +521,14 @@ fn load_keys(
             )
             .into());
         }
+    } else if response[0] == rssh_proto::messages::SSH_AGENT_FAILURE {
+        // Agent is locked or operation failed
+        return Err("Agent is locked or operation failed".into());
+    } else if response[0] == rssh_proto::messages::SSH_AGENT_EXTENSION_FAILURE {
+        // Extension-specific failure
+        return Err("Extension operation failed".into());
     } else {
-        // Fallback to standard SSH agent list
-        // This means the agent doesn't support our extensions
-        app.keys.clear();
-        app.set_status("Agent doesn't support management extensions".to_string());
+        return Err(format!("Unexpected response type: {}", response[0]).into());
     }
 
     Ok(())

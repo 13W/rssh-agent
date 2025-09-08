@@ -21,9 +21,12 @@ rand = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 ed25519-dalek = "2.1"
+rsa = "0.9"
 ciborium = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+hex = "0.4"
+tokio-test = "0.4"
