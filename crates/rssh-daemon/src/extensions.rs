@@ -15,18 +15,48 @@ pub use rssh_proto::cbor::ExtensionRequest;
 // pub struct ErrorInfo { ... }
 
 /// Handle manage.list extension
-pub fn handle_manage_list(ram_keys: Vec<KeyInfo>, storage_dir: Option<&str>) -> Result<Vec<u8>> {
+pub fn handle_manage_list(
+    ram_keys: Vec<KeyInfo>, 
+    storage_dir: Option<&str>,
+    master_password: Option<&str>,
+) -> Result<Vec<u8>> {
     use chrono::Utc;
     use rssh_proto::cbor::{ManageListResponse, ManagedKey};
+    use rssh_core::keyfile::KeyFile;
 
     // Collect fingerprints of loaded keys
     let loaded_fingerprints: HashSet<String> =
         ram_keys.iter().map(|k| k.fingerprint.clone()).collect();
 
+    // Build a set of fingerprints that exist on disk
+    let mut disk_fingerprints: HashSet<String> = HashSet::new();
+    if let Some(dir) = storage_dir {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if let Ok(file_name) = entry.file_name().into_string() {
+                    if file_name.starts_with("sha256-") && file_name.ends_with(".json") {
+                        let fingerprint = file_name
+                            .strip_prefix("sha256-")
+                            .and_then(|s| s.strip_suffix(".json"))
+                            .unwrap_or("")
+                            .to_string();
+                        disk_fingerprints.insert(fingerprint);
+                    }
+                }
+            }
+        }
+    }
+
     // Convert RAM keys to ManagedKey format
     let mut managed_keys: Vec<ManagedKey> = ram_keys
         .into_iter()
         .map(|key| {
+            // Check if key exists on disk to determine correct source
+            let key_on_disk = disk_fingerprints.contains(&key.fingerprint);
+
+            // If key exists on disk, it's internal regardless of how it was loaded
+            let is_internal = key_on_disk || !key.is_external;
+
             // Determine format based on key type
             let format = match key.key_type.as_str() {
                 "ed25519" => "ssh-ed25519",
@@ -50,9 +80,9 @@ pub fn handle_manage_list(ram_keys: Vec<KeyInfo>, storage_dir: Option<&str>) -> 
                 key_type: key.key_type,
                 format,
                 description: key.description,
-                source: if key.is_external { "external".to_string() } else { "internal".to_string() },
+                source: if is_internal { "internal".to_string() } else { "external".to_string() },
                 loaded: true,  // These are all loaded in RAM
-                has_disk: !key.is_external,  // Internal keys have disk entries
+                has_disk: key_on_disk,  // True if key exists on disk
                 has_cert: key.has_cert,
                 constraints,
                 created: None,  // TODO: Track creation time
@@ -62,46 +92,84 @@ pub fn handle_manage_list(ram_keys: Vec<KeyInfo>, storage_dir: Option<&str>) -> 
         .collect();
 
     // Add disk keys that are not loaded
-    if let Some(dir) = storage_dir {
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                if let Ok(file_name) = entry.file_name().into_string() {
-                    // Check if it's a key file (sha256-*.json)
-                    if file_name.starts_with("sha256-") && file_name.ends_with(".json") {
-                        // Extract fingerprint from filename
-                        let fingerprint = file_name
-                            .strip_prefix("sha256-")
-                            .and_then(|s| s.strip_suffix(".json"))
-                            .unwrap_or("")
-                            .to_string();
+    for fingerprint in disk_fingerprints {
+        // Skip if this key is already loaded
+        if loaded_fingerprints.contains(&fingerprint) {
+            continue;
+        }
 
-                        // Skip if this key is already loaded
-                        if loaded_fingerprints.contains(&fingerprint) {
-                            continue;
-                        }
+        // Try to read metadata from the key file if master password is available
+        if let (Some(dir), Some(master_pwd)) = (storage_dir, master_password) {
+            match KeyFile::read_metadata(dir, &fingerprint, master_pwd) {
+                Ok(metadata) => {
+                    // Successfully read metadata, use real data
+                    let key_type_str = match metadata.key_type {
+                        rssh_core::keyfile::KeyType::Ed25519 => "ed25519",
+                        rssh_core::keyfile::KeyType::Rsa => "rsa",
+                    }.to_string();
 
-                        // Try to read basic info from the file without decrypting
-                        // For now, we'll add a placeholder entry
-                        // In a real implementation, we might store metadata unencrypted
-                        managed_keys.push(ManagedKey {
-                            fp_sha256_hex: fingerprint,
-                            key_type: "unknown".to_string(), // Can't determine without decrypting
-                            format: "unknown".to_string(),
-                            description: "".to_string(), // Can't get without decrypting
-                            source: "internal".to_string(), // Disk keys are internal
-                            loaded: false,               // Not loaded in RAM
-                            has_disk: true,              // Obviously on disk
-                            has_cert: false,             // Can't determine without decrypting
-                            constraints: serde_json::json!({
-                                "confirm": false,
-                                "lifetime_expires_at": null,
-                            }),
-                            created: None,
-                            updated: None,
-                        });
-                    }
+                    let format = match metadata.key_type {
+                        rssh_core::keyfile::KeyType::Ed25519 => "ssh-ed25519",
+                        rssh_core::keyfile::KeyType::Rsa => "rsa-sha2-512",
+                    }.to_string();
+
+                    managed_keys.push(ManagedKey {
+                        fp_sha256_hex: fingerprint,
+                        key_type: key_type_str,
+                        format,
+                        description: metadata.description,
+                        source: "internal".to_string(), // Disk keys are internal
+                        loaded: false,               // Not loaded in RAM
+                        has_disk: true,              // Obviously on disk
+                        has_cert: metadata.has_cert,
+                        constraints: serde_json::json!({
+                            "confirm": false,
+                            "lifetime_expires_at": null,
+                        }),
+                        created: Some(metadata.created.to_rfc3339()),
+                        updated: Some(metadata.updated.to_rfc3339()),
+                    });
+                }
+                Err(e) => {
+                    // Failed to read metadata (wrong password, corrupted file, etc.)
+                    // Fall back to placeholder entry
+                    tracing::warn!("Failed to read metadata for key {}: {}", fingerprint, e);
+                    managed_keys.push(ManagedKey {
+                        fp_sha256_hex: fingerprint,
+                        key_type: "unknown".to_string(),
+                        format: "unknown".to_string(),
+                        description: "[error reading metadata]".to_string(),
+                        source: "internal".to_string(), // Disk keys are internal
+                        loaded: false,               // Not loaded in RAM
+                        has_disk: true,              // Obviously on disk
+                        has_cert: false,             // Can't determine without decrypting
+                        constraints: serde_json::json!({
+                            "confirm": false,
+                            "lifetime_expires_at": null,
+                        }),
+                        created: None,
+                        updated: None,
+                    });
                 }
             }
+        } else {
+            // No master password available, use placeholder
+            managed_keys.push(ManagedKey {
+                fp_sha256_hex: fingerprint,
+                key_type: "unknown".to_string(),
+                format: "unknown".to_string(),
+                description: "".to_string(),
+                source: "internal".to_string(), // Disk keys are internal
+                loaded: false,               // Not loaded in RAM
+                has_disk: true,              // Obviously on disk
+                has_cert: false,             // Can't determine without decrypting
+                constraints: serde_json::json!({
+                    "confirm": false,
+                    "lifetime_expires_at": null,
+                }),
+                created: None,
+                updated: None,
+            });
         }
     }
 
@@ -160,6 +228,7 @@ pub fn handle_control_shutdown() -> Result<Vec<u8>> {
 pub async fn handle_manage_import(
     data: &[u8],
     ram_store: &rssh_core::ram_store::RamStore,
+    master_password: &str,
 ) -> Result<Vec<u8>> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use chrono::Utc;
@@ -226,10 +295,6 @@ pub async fn handle_manage_import(
         format!("{}/.ssh/rssh-agent", home)
     });
 
-    // For now, use a default master password
-    // In production, this should be obtained from the config or prompt
-    let master_password = "master_password"; // TODO: Get actual master password
-
     // Write key file to disk
     KeyFile::write(
         &storage_dir,
@@ -271,6 +336,7 @@ pub async fn handle_manage_load(
     data: &[u8],
     ram_store: &rssh_core::ram_store::RamStore,
     storage_dir: Option<&str>,
+    master_password: &str,
 ) -> Result<Vec<u8>> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use rssh_core::keyfile::KeyFile;
@@ -288,10 +354,6 @@ pub async fn handle_manage_load(
     // Get storage directory
     let storage_dir = storage_dir
         .ok_or_else(|| Error::Internal("Storage directory not configured".to_string()))?;
-
-    // For now, use a default master password
-    // TODO: In production, this should be obtained from the config
-    let master_password = "master_password";
 
     // Read the key file from disk
     let key_payload = KeyFile::read(storage_dir, &request.fp_sha256_hex, master_password)?;

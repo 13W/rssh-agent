@@ -13,6 +13,7 @@ pub struct Agent {
     ram_store: Arc<RamStore>,
     locked: Arc<RwLock<bool>>,
     storage_dir: Option<String>,
+    master_password: Arc<RwLock<Option<String>>>,
 }
 
 impl Agent {
@@ -22,6 +23,7 @@ impl Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(true)), // Start locked
             storage_dir: None,
+            master_password: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -31,6 +33,7 @@ impl Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(true)), // Start locked
             storage_dir: Some(storage_dir),
+            master_password: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -262,6 +265,12 @@ impl Agent {
 
         match self.ram_store.lock() {
             Ok(_) => {
+                // Clear the stored master password when locking
+                {
+                    let mut master_password = self.master_password.write().await;
+                    *master_password = None;
+                }
+                
                 let mut locked = self.locked.write().await;
                 *locked = true;
                 tracing::info!("Agent locked");
@@ -281,6 +290,12 @@ impl Agent {
 
         match self.ram_store.unlock(&passphrase_str) {
             Ok(_) => {
+                // Store the master password for management operations
+                {
+                    let mut master_password = self.master_password.write().await;
+                    *master_password = Some(passphrase_str.into_owned());
+                }
+                
                 let mut locked = self.locked.write().await;
                 *locked = false;
                 tracing::info!("Agent unlocked");
@@ -316,7 +331,13 @@ impl Agent {
                     Err(_) => return Ok(messages::build_failure()),
                 };
 
-                match extensions::handle_manage_list(keys, self.storage_dir.as_deref()) {
+                // Get master password for reading disk key metadata
+                let master_password = {
+                    let master_password_guard = self.master_password.read().await;
+                    master_password_guard.clone()
+                };
+
+                match extensions::handle_manage_list(keys, self.storage_dir.as_deref(), master_password.as_deref()) {
                     Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
                     Err(e) => {
                         tracing::error!("Failed to handle manage.list: {}", e);
@@ -341,11 +362,24 @@ impl Agent {
                 }
             }
             "manage.load" => {
+                // Get master password for disk operations
+                let master_password = {
+                    let master_password_guard = self.master_password.read().await;
+                    match master_password_guard.as_ref() {
+                        Some(password) => password.clone(),
+                        None => {
+                            tracing::error!("Master password not available for manage.load");
+                            return Ok(messages::build_failure());
+                        }
+                    }
+                };
+
                 // Handle load request
                 match extensions::handle_manage_load(
                     &request.data,
                     &self.ram_store,
                     self.storage_dir.as_deref(),
+                    &master_password,
                 )
                 .await
                 {
@@ -361,8 +395,21 @@ impl Agent {
             }
             "manage.import" => {
                 tracing::info!("Received import request via extension");
+                
+                // Get master password for disk operations
+                let master_password = {
+                    let master_password_guard = self.master_password.read().await;
+                    match master_password_guard.as_ref() {
+                        Some(password) => password.clone(),
+                        None => {
+                            tracing::error!("Master password not available for manage.import");
+                            return Ok(messages::build_failure());
+                        }
+                    }
+                };
+
                 // Parse CBOR data to get fingerprint and other params
-                match extensions::handle_manage_import(&request.data, &self.ram_store).await {
+                match extensions::handle_manage_import(&request.data, &self.ram_store, &master_password).await {
                     Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
                     Err(e) => {
                         tracing::error!("Failed to handle manage.import: {}", e);

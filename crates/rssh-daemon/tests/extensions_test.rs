@@ -78,7 +78,7 @@ fn test_manage_list_handler() {
         is_external: false,
     }];
 
-    let result = extensions::handle_manage_list(keys, None);
+    let result = extensions::handle_manage_list(keys, None, None);
     assert!(result.is_ok());
 
     let cbor_data = result.unwrap();

@@ -49,6 +49,17 @@ pub struct KeyPayload {
     pub updated: DateTime<Utc>,
 }
 
+/// Metadata about a key file (without the secret key data)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyMetadata {
+    #[serde(rename = "type")]
+    pub key_type: KeyType,
+    pub description: String,
+    pub has_cert: bool,
+    pub created: DateTime<Utc>,
+    pub updated: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum KeyType {
@@ -189,6 +200,24 @@ impl KeyFile {
         // This will be done when we implement openssh-key-v1 parsing
 
         Ok(payload)
+    }
+
+    /// Read metadata from a key file without loading the secret key data
+    pub fn read_metadata<P: AsRef<Path>>(
+        storage_dir: P,
+        fingerprint_hex: &str,
+        master_password: &str,
+    ) -> Result<KeyMetadata> {
+        // This reuses the same decryption logic as read() but only returns metadata
+        let payload = Self::read(storage_dir, fingerprint_hex, master_password)?;
+        
+        Ok(KeyMetadata {
+            key_type: payload.key_type,
+            description: payload.description,
+            has_cert: payload.cert_openssh_b64.is_some(),
+            created: payload.created,
+            updated: payload.updated,
+        })
     }
 }
 
