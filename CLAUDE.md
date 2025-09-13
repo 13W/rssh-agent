@@ -4,149 +4,194 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-rssh-agent is a secure SSH agent daemon for Linux that provides drop-in compatibility with OpenSSH agent protocol while adding enhanced security features. It's written in Rust and targets Linux systems (Ubuntu ≥ 22.04, Debian 12+).
+rssh-agent is a secure SSH agent daemon for Linux that provides drop-in compatibility with OpenSSH while adding enhanced security features including encrypted key storage, a management TUI, and hardened memory management.
 
-## Build and Development Commands
+**Key Technologies:**
+- Rust 2024 (MSRV 1.89) with Cargo workspace (5 crates)
+- Tokio async runtime for daemon and socket handling
+- Cryptography: Argon2id KDF + XChaCha20-Poly1305 AEAD
+- SSH protocol via ssh-key crate, custom CBOR extensions
+- ratatui + crossterm for terminal UI
 
-### Building
+## Development Commands
+
+### Building & Testing
 ```bash
-# Build all workspace crates
+# Build everything (including TUI by default)
 cargo build
 
-# Build in release mode with optimizations
+# Build release version
 cargo build --release
 
-# Build specific crate
-cargo build -p rssh-daemon
-```
+# Build without TUI feature
+cargo build --no-default-features
 
-### Testing
-```bash
 # Run all tests
 cargo test
 
-# Run tests for specific crate
-cargo test -p rssh-core
-
-# Run tests with output
-cargo test -- --nocapture
-
-# Run the full test suite script
+# Run integration test script
 ./test-full.sh
-```
 
-### Code Quality
-```bash
-# Format all code
+# Format and lint (required before commits)
 cargo fmt
-
-# Check formatting without applying changes
-cargo fmt -- --check
-
-# Run clippy linter
 cargo clippy -- -D warnings
-
-# Run clippy on all targets including tests
-cargo clippy --all-targets -- -D warnings
 ```
 
 ### Running the Agent
 ```bash
-# Build and run the CLI
-cargo run --bin rssh-agent -- --help
+# Initialize agent (creates config with master password)
+cargo run -- init --dir ~/.ssh/rssh-agent
 
-# Initialize agent configuration (required before first use)
-cargo run --bin rssh-agent -- init --dir ~/.rssh-agent
+# Start daemon in foreground (for debugging)
+cargo run -- daemon --foreground
 
-# Run daemon in foreground mode
-cargo run --bin rssh-agent -- daemon --foreground
+# Start daemon normally (backgrounds, prints SSH_AUTH_SOCK)
+eval "$(cargo run -- daemon)"
 
-# Run daemon in background mode
-eval $(cargo run --bin rssh-agent -- daemon --dir ~/.rssh-agent)
-
-# Launch management TUI
-cargo run --bin rssh-agent -- manage
-
-# Note: By default, memory locking failures are non-fatal (just warnings).
-# Use --require-mlock flag to enforce strict memory locking:
-cargo run --bin rssh-agent -- daemon --require-mlock
+# Open management TUI
+cargo run -- manage
 ```
 
-## Architecture
+## Architecture Overview
 
-### Workspace Structure
-The project uses a Rust workspace with 5 crates:
+### Crate Structure
+```
+crates/
+├── rssh-core/     # Crypto, storage, RAM key manager, constraints
+├── rssh-proto/    # SSH wire protocol + CBOR extensions
+├── rssh-daemon/   # Socket server, IPC, signal handling
+├── rssh-cli/      # CLI binary with subcommands
+└── rssh-tui/      # Management terminal interface
+```
 
-- **rssh-core**: Core types, errors, and crypto primitives
-  - Defines common error types, key types, and cryptographic operations
-  - Provides the foundation for other crates
+**Key Dependencies:**
+- `tokio`: Async runtime, socket handling
+- `ssh-key`: OpenSSH key format parsing/serialization
+- `argon2`: Master password KDF
+- `chacha20poly1305`: AEAD for encrypted storage
+- `ratatui`/`crossterm`: Terminal UI
+- `clap`: CLI parsing
+- `ciborium`: CBOR for custom protocol extensions
 
-- **rssh-proto**: SSH wire protocol implementation
-  - Handles SSH agent protocol messages (OpenSSH compatible)
-  - Implements message serialization/deserialization
-  - Supports messages: 11, 13, 17-19, 22-23, 25
+### Security Model
 
-- **rssh-daemon**: Agent daemon and socket server
-  - Implements the Unix domain socket server
-  - Manages key storage in encrypted form
-  - Handles agent protocol requests
-  - Implements security hardening (mlockall, RLIMIT_CORE=0, etc.)
+**Master Password:** Required for all operations. Set via `rssh-agent init`. Uses Argon2id KDF with 256 MiB memory, stored as encrypted sentinel in config.json.
 
-- **rssh-cli**: CLI entry point (binary: rssh-agent)
-  - Main commands: init, daemon, lock, unlock, stop, manage
-  - Handles command-line parsing with clap
-  - Manages daemon lifecycle
+**Key Storage:**
+- **Disk:** Keys encrypted under master password in `sha256-<hex>.json` files
+- **RAM:** Keys stay AEAD-encrypted under ephemeral MemKey (derived from master + random salt)
+- **Runtime:** Private keys only decrypted temporarily during signing, then zeroized
 
-- **rssh-tui**: Terminal UI for key management
-  - Built with ratatui and crossterm
-  - Provides administrative interface for key management
-  - Always requires master password for access
+**Daemon Security:**
+- `mlockall()` prevents swapping
+- Socket ACL: owner-only via `SO_PEERCRED`
+- Signal handling for graceful shutdown with secret zeroization
 
-### Security Architecture
+### Protocol Support
 
-1. **Master Password System**
-   - Set once during `init`, stored as Argon2id hash
-   - Required for all key operations
-   - Derives separate keys for disk storage and RAM encryption
+**OpenSSH Messages:** Standard agent protocol (REQUEST_IDENTITIES, SIGN_REQUEST, ADD_IDENTITY, etc.)
 
-2. **Key Storage**
-   - Keys stored encrypted on disk with XChaCha20-Poly1305
-   - Keys in RAM are also encrypted (ephemeral-at-rest)
-   - Private keys decrypted only during signing operations
+**Custom Extensions:** CBOR-encoded `rssh-agent@local` namespace for management operations:
+- `manage.list` - List all keys with metadata
+- `manage.load/unload` - RAM ↔ disk operations
+- `manage.import` - Save external keys to disk
+- `manage.create` - Generate new keys
+- `control.shutdown` - Graceful daemon stop
 
-3. **Process Hardening**
-   - Memory locking (mlockall) prevents swapping
-   - Core dumps disabled (RLIMIT_CORE=0)
-   - Sensitive memory marked with MADV_DONTDUMP
-   - All secrets implement zeroize for secure cleanup
+**Key Types:** Ed25519 (preferred), RSA 2048-8192 bits. No ECDSA/FIDO in v0.1.0.
 
-### Key Flows
+## Implementation Guidelines
 
-1. **Initialization**: `rssh-agent init` → sets master password → creates config
-2. **Daemon Start**: Loads config, sets up socket, waits for connections
-3. **Key Addition**: SSH client → agent protocol → decrypt with master → store encrypted
-4. **Signing**: Decrypt key temporarily → sign → zeroize decrypted key
-5. **Lock/Unlock**: Zeroize/re-derive memory encryption keys
+### Error Handling
+- Use custom error types in rssh-core with structured error codes
+- Extension protocol always returns protocol SUCCESS with CBOR payload containing `{"ok": bool, "error": {...}}`
+- Standard SSH agent messages return proper SSH_AGENT_FAILURE codes
 
-## Important Implementation Details
+### Memory Management
+- All secrets implement `zeroize` trait
+- Use secure random generation for salts/nonces
+- MemKey zeroization on lock/shutdown critical for security
 
-- **Protocol Compatibility**: Implements core OpenSSH agent protocol, compatible with ssh-add and ssh
-- **Supported Key Types**: Ed25519 and RSA (2048-8192 bits)
-- **Constraints**: Supports confirm and lifetime constraints only
-- **Platform**: Linux-only, requires Unix domain sockets
-- **Dependencies**: Uses tokio for async, ssh-key for key handling, argon2 for KDF
-- **Error Handling**: Comprehensive error types in rssh-core, propagated through Result types
-- **Logging**: Structured logging with tracing, configurable via RUST_LOG
+### File Operations
+- Atomic writes: tmp → fsync → rename → fsync(dir)
+- Strict permissions: directories 0700, files 0600
+- No symlinks/hardlinks allowed
 
-## Testing Approach
+### Threading & Async
+- Daemon uses Tokio with Unix domain socket listener
+- Per-key signing serialization (max 1 concurrent sign per key)
+- Extension operations through async channels to daemon core
 
-The codebase includes:
-- Unit tests in each crate (run with `cargo test`)
-- Integration test script (`test-full.sh`) that tests daemon lifecycle
-- Test utilities in test directories for specific scenarios
+## Testing Strategy
+
+**Unit Tests:** Each crate has comprehensive tests for core functionality
+**Integration Tests:** `test-full.sh` script tests daemon lifecycle with real ssh-add/ssh clients
+**Security Tests:** Verify file permissions, socket ACLs, memory zeroization
 
 When modifying code:
-1. Run `cargo fmt` to ensure consistent formatting
-2. Run `cargo clippy -- -D warnings` to catch common issues
-3. Run `cargo test` to verify unit tests pass
-4. Run `./test-full.sh` for integration testing if modifying daemon behavior
+1. `cargo fmt` - required formatting
+2. `cargo clippy -- -D warnings` - catch issues
+3. `cargo test` - unit tests must pass
+4. `./test-full.sh` - integration tests for daemon changes
+
+## Key Files
+
+- `Cargo.toml` - Workspace configuration, feature flags (tui enabled by default)
+- `test-full.sh` - Integration test script
+- `crates/rssh-*/src/lib.rs` - Crate entry points with public APIs
+- `crates/rssh-daemon/src/agent.rs` - Core daemon agent implementation
+- `crates/rssh-core/src/keyfile.rs` - Encrypted key storage format
+- `crates/rssh-proto/src/wire.rs` - SSH protocol message handling
+
+## Development Notes
+
+- **Never log secrets:** Log fingerprints, error codes, paths only
+- **UTF-8 validation:** All user input (descriptions, passwords) must be validated
+- **Constraint handling:** confirm/lifetime stored in RAM only, survive lock/unlock
+- **Certificate support:** Auto-import attached certs, validate against public key
+- **Shell integration:** Daemon outputs only SSH_AUTH_SOCK (no SSH_AGENT_PID)
+
+This codebase prioritizes security and OpenSSH compatibility. When making changes, always consider the security implications and test with real SSH clients.
+
+## AI Team Configuration (autogenerated by team-configurator, 2025-09-13)
+
+**Important: YOU MUST USE subagents when available for the task.**
+
+### Detected Tech Stack
+- **Language**: Rust 2024 (MSRV 1.89), Cargo workspace with 5 crates
+- **Async Runtime**: Tokio 1.40+ with Unix domain sockets and signal handling
+- **Cryptography**: Argon2id KDF, XChaCha20-Poly1305 AEAD, ssh-key crate, zeroize
+- **TUI Framework**: ratatui 0.28+ with crossterm 0.28+ for terminal UI
+- **CLI Framework**: Clap 4.5+ with derive and env features
+- **Serialization**: CBOR via ciborium, JSON via serde_json
+- **System Integration**: nix crate for Unix system calls, libc bindings
+- **Security Focus**: Memory-safe daemon with encrypted key storage, hardened against attacks
+
+### Team Assignment
+
+| Task | Agent | Notes |
+|------|-------|-------|
+| **Rust Backend Development** | `rust-backend-expert` | Primary agent for async daemon, socket handling, crypto operations |
+| **Terminal UI Development** | `rust-tui-developer` | Specialized for ratatui-based management interface improvements |
+| **Code Review & Security** | `code-reviewer` | MANDATORY before merges. Focus on crypto implementations and memory safety |
+| **Performance Optimization** | `performance-optimizer` | Critical for daemon efficiency, crypto speed, and memory usage |
+| **Documentation & Specs** | `documentation-specialist` | Technical specs, user guides, and API documentation |
+| **Codebase Analysis** | `code-archaeologist` | Deep analysis for refactoring, architecture decisions, technical debt |
+
+### Specialist Recommendations
+
+**For Rust-Specific Development:**
+- Use `rust-backend-expert` for daemon core, async operations, cryptographic implementations, and protocol handling
+- Use `rust-tui-developer` for all terminal UI improvements, event handling, and user experience enhancements
+- Always involve `code-reviewer` for any cryptographic or security-critical changes due to sensitive nature of SSH key handling
+- Use `performance-optimizer` for crypto performance, memory management, and daemon efficiency optimizations
+
+**Task Examples:**
+- New SSH protocol features → `@rust-backend-expert`
+- Management TUI improvements → `@rust-tui-developer`
+- Crypto implementation review → `@code-reviewer`
+- Daemon performance issues → `@performance-optimizer`
+- User documentation → `@documentation-specialist`
+- Architecture analysis → `@code-archaeologist`
+
+Try: `@rust-backend-expert implement key generation with Ed25519 support`

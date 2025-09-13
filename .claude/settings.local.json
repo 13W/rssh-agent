@@ -1,19 +1,20 @@
 {
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "includeCoAuthoredBy": false,
-  "permissions": {
-    "allow": [
-      "mcp__rust",
-      "mcp__cargo",
-      "mcp__context7",
-      "mcp__serena"
-    ],
-    "deny": [
-      "Bash(sudo:*)"
-    ]
-  },
-  "enabledMcpjsonServers": [
-    "rust-mcp"
-  ],
-  "enableAllProjectMcpServers": true
+	"$schema": "https://json.schemastore.org/claude-code-settings.json",
+	"includeCoAuthoredBy": false,
+	"permissions": {
+		"allow": [
+			"mcp__rust-mcp",
+			"mcp__cargo-mcp",
+			"mcp__context7",
+			"mcp__serena",
+			"mcp__cargo-mcp__cargo_check",
+			"mcp__cargo-mcp__cargo_test",
+			"mcp__cargo-mcp__cargo_clippy",
+			"Bash(git add:*)",
+			"Bash(git commit:*)"
+		],
+		"deny": ["Bash(sudo:*)"]
+	},
+	"enableAllProjectMcpServers": true,
+	"enabledMcpjsonServers": ["rust-mcp"]
 }
