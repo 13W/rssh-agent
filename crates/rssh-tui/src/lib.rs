@@ -311,11 +311,16 @@ fn run_app<B: Backend>(
                         if let Some(idx) = app.selected_key
                             && idx < app.keys.len()
                         {
-                            app.input_mode = InputMode::Confirm;
-                            app.set_status(format!(
-                                "Delete key {}? (y/n)",
-                                app.keys[idx].fingerprint
-                            ));
+                            let key = &app.keys[idx];
+                            if !key.has_disk {
+                                app.set_status("Cannot delete external keys (use ssh-add -d)".to_string());
+                            } else {
+                                app.input_mode = InputMode::Confirm;
+                                app.set_status(format!(
+                                    "PERMANENTLY delete key {} from disk? (y/n)",
+                                    key.fingerprint
+                                ));
+                            }
                         }
                     }
                     KeyCode::Char('l') => {
@@ -680,9 +685,9 @@ fn run_app<B: Backend>(
                             if let Err(e) =
                                 remove_key(socket_path.as_ref(), &app.keys[idx].fingerprint)
                             {
-                                app.set_status(format!("Failed to remove key: {}", e));
+                                app.set_status(format!("Failed to delete key: {}", e));
                             } else {
-                                app.set_status("Key removed".to_string());
+                                app.set_status("Key permanently deleted from disk".to_string());
                                 if let Err(e) = load_keys(app, socket_path.as_ref()) {
                                     app.set_status(format!("Failed to refresh: {}", e));
                                 }
@@ -1038,7 +1043,7 @@ fn ui(f: &mut Frame, app: &App) {
             ]),
             Line::from(vec![
                 Span::styled("d/Del", Style::default().fg(Color::Yellow)),
-                Span::raw("  Remove selected key"),
+                Span::raw("  Permanently delete key from disk"),
             ]),
             Line::from(""),
             Line::from(vec![Span::styled(
@@ -1379,12 +1384,114 @@ fn unlock_agent(
 }
 
 fn remove_key(
-    _socket_path: Option<&String>,
-    _fingerprint: &str,
+    socket_path: Option<&String>,
+    fingerprint: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // This would use SSH_AGENTC_REMOVE_IDENTITY
-    // For now, return an error since we need the actual key blob
-    Err("Key removal requires the original key blob (use ssh-add -d)".into())
+    delete_key(socket_path, fingerprint)
+}
+
+fn delete_key(
+    socket_path: Option<&String>,
+    fingerprint: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = socket_path
+        .cloned()
+        .or_else(|| std::env::var("SSH_AUTH_SOCK").ok())
+        .ok_or("No socket path available")?;
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(&socket)?;
+
+    // Build CBOR request for manage.delete
+    use rssh_proto::cbor::ExtensionRequest;
+    let delete_data = {
+        #[derive(serde::Serialize)]
+        struct DeleteRequest {
+            fp_sha256_hex: String,
+        }
+
+        let req = DeleteRequest {
+            fp_sha256_hex: fingerprint.to_string(),
+        };
+
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&req, &mut cbor)?;
+        cbor
+    };
+
+    let request = ExtensionRequest {
+        extension: "manage.delete".to_string(),
+        data: delete_data,
+    };
+
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&request, &mut cbor_data)?;
+
+    // Build SSH protocol message with extension namespace
+    let mut message = Vec::new();
+    message.push(rssh_proto::messages::SSH_AGENTC_EXTENSION);
+
+    // Add extension namespace
+    let ext_namespace = b"rssh-agent@local";
+    message.extend_from_slice(&(ext_namespace.len() as u32).to_be_bytes());
+    message.extend_from_slice(ext_namespace);
+
+    // Add CBOR data
+    message.extend_from_slice(&cbor_data);
+
+    // Add length prefix for the whole message
+    let mut full_message = Vec::new();
+    full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    full_message.extend_from_slice(&message);
+
+    stream.write_all(&full_message)?;
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut response = vec![0u8; len];
+    stream.read_exact(&mut response)?;
+
+    // Check response type
+    if response[0] == rssh_proto::messages::SSH_AGENT_SUCCESS {
+        // Parse the CBOR response to check if it's actually successful
+        let mut offset = 1;
+        if response.len() < offset + 4 {
+            return Err("Response too short".into());
+        }
+
+        let data_len = u32::from_be_bytes([
+            response[offset],
+            response[offset + 1],
+            response[offset + 2],
+            response[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if response.len() < offset + data_len {
+            return Err("Response data truncated".into());
+        }
+
+        let cbor_data = &response[offset..offset + data_len];
+        let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
+
+        if !cbor_response.success {
+            // Parse the actual response data for error message
+            let response_data: serde_json::Value = ciborium::from_reader(&cbor_response.data[..])?;
+            if let Some(error) = response_data.get("error").and_then(|e| e.as_str()) {
+                return Err(error.into());
+            }
+            return Err("Delete operation failed".into());
+        }
+
+        Ok(())
+    } else {
+        Err("Failed to delete key".into())
+    }
 }
 
 fn load_disk_key(

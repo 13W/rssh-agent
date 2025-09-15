@@ -49,6 +49,28 @@ fn wrap_manage_create_response(
     Ok(cbor_data)
 }
 
+/// Helper function to wrap a ManageDeleteResponse in ExtensionResponse
+fn wrap_manage_delete_response(
+    response: rssh_proto::cbor::ManageDeleteResponse,
+) -> Result<Vec<u8>> {
+    // Convert to CBOR bytes for the data field
+    let mut data_cbor = Vec::new();
+    ciborium::into_writer(&response, &mut data_cbor)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    // Create the ExtensionResponse wrapper
+    let extension_response = rssh_proto::cbor::ExtensionResponse {
+        success: response.ok,
+        data: data_cbor,
+    };
+
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&extension_response, &mut cbor_data)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    Ok(cbor_data)
+}
+
 // Use the ExtensionRequest from rssh_proto::cbor
 pub use rssh_proto::cbor::ExtensionRequest;
 
@@ -638,6 +660,90 @@ pub fn handle_manage_unload(
         .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
 
     Ok(cbor_data)
+}
+
+/// Handle manage.delete extension - permanently deletes a key from disk storage
+pub fn handle_manage_delete(
+    data: &[u8],
+    ram_store: &rssh_core::ram_store::RamStore,
+    storage_dir: Option<&str>,
+) -> Result<Vec<u8>> {
+    use rssh_proto::cbor::{ManageDeleteRequest, ManageDeleteResponse};
+
+    // Parse the CBOR request data
+    let request: ManageDeleteRequest = match ciborium::from_reader(data) {
+        Ok(req) => req,
+        Err(e) => {
+            let response = ManageDeleteResponse {
+                ok: false,
+                error: Some(format!("Failed to parse delete request: {}", e)),
+                fingerprint: None,
+            };
+            return wrap_manage_delete_response(response);
+        }
+    };
+
+    // Get storage directory
+    let storage_dir = match storage_dir {
+        Some(dir) => dir,
+        None => {
+            let response = ManageDeleteResponse {
+                ok: false,
+                error: Some("Storage directory not configured".to_string()),
+                fingerprint: None,
+            };
+            return wrap_manage_delete_response(response);
+        }
+    };
+
+    // Construct the keyfile path
+    let keyfile_path = std::path::Path::new(storage_dir)
+        .join(format!("sha256-{}.json", request.fp_sha256_hex));
+
+    // Check if the keyfile exists
+    if !keyfile_path.exists() {
+        let response = ManageDeleteResponse {
+            ok: false,
+            error: Some("Key file not found on disk".to_string()),
+            fingerprint: Some(request.fp_sha256_hex),
+        };
+        return wrap_manage_delete_response(response);
+    }
+
+    // If the key is loaded in RAM, unload it first
+    if let Ok(keys) = ram_store.list_keys() {
+        if keys.iter().any(|k| k.fingerprint == request.fp_sha256_hex) {
+            tracing::debug!("Key {} is loaded in RAM, unloading before deletion", request.fp_sha256_hex);
+            if let Err(e) = ram_store.unload_key(&request.fp_sha256_hex) {
+                tracing::warn!("Failed to unload key {} from RAM before deletion: {}", request.fp_sha256_hex, e);
+                // Continue with deletion anyway
+            }
+        }
+    }
+
+    // Delete the keyfile from disk
+    match std::fs::remove_file(&keyfile_path) {
+        Ok(()) => {
+            tracing::info!("Successfully deleted key file: {}", request.fp_sha256_hex);
+
+            let response = ManageDeleteResponse {
+                ok: true,
+                error: None,
+                fingerprint: Some(request.fp_sha256_hex),
+            };
+            wrap_manage_delete_response(response)
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete key file {}: {}", request.fp_sha256_hex, e);
+
+            let response = ManageDeleteResponse {
+                ok: false,
+                error: Some(format!("Failed to delete key file: {}", e)),
+                fingerprint: Some(request.fp_sha256_hex),
+            };
+            wrap_manage_delete_response(response)
+        }
+    }
 }
 
 /// Handle manage.set_desc extension - updates the description of a stored key
@@ -1517,5 +1623,37 @@ mod tests {
         let request = parse_extension_request(&message).unwrap();
         assert_eq!(request.extension, "unknown-ext@openssh.com");
         assert_eq!(request.data, data);
+    }
+
+    #[test]
+    fn test_manage_delete_request_parsing() {
+        use rssh_proto::cbor::{ManageDeleteRequest, ManageDeleteResponse};
+
+        // Test that we can parse a valid delete request
+        let request = ManageDeleteRequest {
+            fp_sha256_hex: "1234567890abcdef".to_string(),
+        };
+
+        let mut cbor_data = Vec::new();
+        ciborium::into_writer(&request, &mut cbor_data).unwrap();
+
+        // Try to parse it back
+        let parsed: ManageDeleteRequest = ciborium::from_reader(cbor_data.as_slice()).unwrap();
+        assert_eq!(parsed.fp_sha256_hex, "1234567890abcdef");
+
+        // Test response structure
+        let response = ManageDeleteResponse {
+            ok: true,
+            error: None,
+            fingerprint: Some("1234567890abcdef".to_string()),
+        };
+
+        let mut response_cbor = Vec::new();
+        ciborium::into_writer(&response, &mut response_cbor).unwrap();
+
+        let parsed_response: ManageDeleteResponse = ciborium::from_reader(response_cbor.as_slice()).unwrap();
+        assert!(parsed_response.ok);
+        assert!(parsed_response.error.is_none());
+        assert_eq!(parsed_response.fingerprint, Some("1234567890abcdef".to_string()));
     }
 }

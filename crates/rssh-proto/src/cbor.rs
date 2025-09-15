@@ -82,3 +82,19 @@ pub struct ManageCreateResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub public_key: Option<String>, // Base64 encoded public key
 }
+
+/// Request for manage.delete operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManageDeleteRequest {
+    pub fp_sha256_hex: String,
+}
+
+/// Response for manage.delete operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManageDeleteResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}

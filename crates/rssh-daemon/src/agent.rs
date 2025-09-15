@@ -579,6 +579,27 @@ impl Agent {
                     }
                 }
             }
+            "manage.delete" => {
+                tracing::debug!("Handling manage.delete extension");
+
+                match extensions::handle_manage_delete(
+                    &request.data,
+                    &self.ram_store,
+                    self.storage_dir.as_deref(),
+                ) {
+                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                    Err(e) => {
+                        tracing::error!("Failed to handle manage.delete: {}", e);
+                        // Check if we should return a specific error response
+                        match extensions::build_error_response(e) {
+                            Ok(error_response) => {
+                                Ok(extensions::build_extension_response(error_response))
+                            }
+                            Err(_) => Ok(messages::build_failure()),
+                        }
+                    }
+                }
+            }
             "manage.set_desc" => {
                 tracing::debug!("Handling manage.set_desc extension");
 
