@@ -54,10 +54,9 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
     let path = path.as_ref();
 
     // Check if path is a symlink
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() {
-            return Err(Error::Config("Cannot write to symlink".into()));
-        }
+    if let Ok(metadata) = fs::symlink_metadata(path)
+        && metadata.file_type().is_symlink() {
+        return Err(Error::Config("Cannot write to symlink".into()));
     }
 
     let parent = path

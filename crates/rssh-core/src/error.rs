@@ -43,6 +43,9 @@ pub enum Error {
     #[error("Wrong master password")]
     WrongPassword,
 
+    #[error("Too many password attempts - try again in {0}s")]
+    RateLimited(u64),
+
     #[error("Master unlock required")]
     NeedMasterUnlock,
 
@@ -81,6 +84,8 @@ pub enum Error {
 
     #[error("Wrong key password")]
     BadKeyPassword,
+    #[error("User denied confirmation")]
+    ConfirmationDenied,
 
     #[error("Invalid certificate format")]
     BadCertFormat,
@@ -93,6 +98,9 @@ pub enum Error {
 
     #[error("No disk entry for this key")]
     NoDiskEntry,
+
+    #[error("Key has expired")]
+    KeyExpired,
 
     #[error("Internal error: {0}")]
     Internal(String),
@@ -113,6 +121,7 @@ impl Error {
             Error::AlreadyRunning | Error::AlreadyInUse => 4,
             Error::Locked | Error::NeedMasterUnlock => 5,
             Error::WrongPassword | Error::BadKeyPassword => 6,
+            Error::RateLimited(_) => 6, // Same as wrong password for consistency
             Error::NotInitialized | Error::AlreadyInitialized => 7,
             Error::Unsupported | Error::NotImplemented => 8,
             Error::Timeout | Error::Io(_) => 9,

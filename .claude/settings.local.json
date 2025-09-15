@@ -10,8 +10,17 @@
 			"mcp__cargo-mcp__cargo_check",
 			"mcp__cargo-mcp__cargo_test",
 			"mcp__cargo-mcp__cargo_clippy",
-			"Bash(git add:*)",
-			"Bash(git commit:*)"
+			"Bash(git:*)",
+			"Bash(cargo:*)",
+			"Bash(./target/debug/rssh-agent --help)",
+			"Bash(./target/**/rssh-agent:*)",
+			"Bash(./target/:*)",
+			"Bash(./target/debug/rssh-agent unlock:*)",
+			"Bash(./target/debug/rssh-agent stop:*)",
+			"Bash(./:*)",
+			"Bash(head:*)",
+			"Bash(chmod:*)",
+			"Bash(rustc:*)"
 		],
 		"deny": ["Bash(sudo:*)"]
 	},

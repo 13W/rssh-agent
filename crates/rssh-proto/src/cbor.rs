@@ -54,3 +54,31 @@ pub struct KeyInfo {
     pub use_count: u64,
     pub constraints: Vec<String>,
 }
+
+/// Request for manage.create operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManageCreateRequest {
+    pub key_type: String, // "ed25519" or "rsa"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bit_length: Option<u32>, // For RSA keys (2048, 3072, 4096, etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "default_load_to_ram")]
+    pub load_to_ram: bool, // Whether to load the key to RAM after creation
+}
+
+fn default_load_to_ram() -> bool {
+    true
+}
+
+/// Response for manage.create operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManageCreateResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>, // Base64 encoded public key
+}

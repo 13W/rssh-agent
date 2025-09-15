@@ -6,3 +6,5 @@ pub mod openssh;
 pub mod ram_store;
 
 pub use error::{Error, Result};
+pub mod perf_cache;
+pub mod optimized_ram_store;

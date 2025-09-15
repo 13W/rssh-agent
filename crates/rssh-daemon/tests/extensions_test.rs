@@ -116,7 +116,9 @@ mod integration_tests {
         let socket_path = temp_dir.path().join("test.sock");
 
         // Create and start the agent
-        let agent = Arc::new(Agent::new());
+        use rssh_core::config::Config;
+        let config = Config::new_with_sentinel(temp_dir.path(), "test_password_12345").unwrap();
+        let agent = Arc::new(Agent::new(config));
         let server = SocketServer::new(socket_path.clone(), agent.clone());
 
         // Start the server in a background task

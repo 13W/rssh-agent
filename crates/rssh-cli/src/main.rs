@@ -90,7 +90,10 @@ enum Commands {
     #[cfg(feature = "tui")]
     Manage,
     /// Generate shell completions
-    Completion { shell: CompletionShell },
+    Completion {
+        /// Shell to generate completions for
+        shell: CompletionShell
+    },
     /// Display manual page
     Man,
 }
@@ -100,6 +103,7 @@ enum CompletionShell {
     Bash,
     Zsh,
     Fish,
+    PowerShell,
 }
 
 fn main() -> ExitCode {
@@ -169,14 +173,27 @@ fn main() -> ExitCode {
                 CompletionShell::Bash => Shell::Bash,
                 CompletionShell::Zsh => Shell::Zsh,
                 CompletionShell::Fish => Shell::Fish,
+                CompletionShell::PowerShell => Shell::PowerShell,
             };
 
             generate(shell, &mut cmd, "rssh-agent", &mut std::io::stdout());
             Ok(())
         }
         Some(Commands::Man) => {
-            eprintln!("Man command not yet implemented");
-            Ok(())
+            use clap::CommandFactory;
+            use clap_mangen::Man;
+            use std::io::Write;
+
+            let cmd = Cli::command();
+            let man = Man::new(cmd);
+            let mut buffer = Vec::new();
+            if let Err(e) = man.render(&mut buffer) {
+                Err(rssh_core::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
+            } else if let Err(e) = std::io::stdout().write_all(&buffer) {
+                Err(rssh_core::Error::Io(e))
+            } else {
+                Ok(())
+            }
         }
         None => {
             eprintln!("No command specified. Use --help for usage information.");

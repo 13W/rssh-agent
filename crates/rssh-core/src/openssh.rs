@@ -59,7 +59,7 @@ impl SshPrivateKey {
     /// Serialize to OpenSSH format with optional passphrase
     pub fn to_openssh(&self, passphrase: Option<&str>, _rounds: Option<u32>) -> Result<Vec<u8>> {
         let rounds = _rounds.unwrap_or(DEFAULT_BCRYPT_ROUNDS);
-        if rounds < MIN_BCRYPT_ROUNDS || rounds > MAX_BCRYPT_ROUNDS {
+        if !(MIN_BCRYPT_ROUNDS..=MAX_BCRYPT_ROUNDS).contains(&rounds) {
             return Err(Error::Config(format!(
                 "bcrypt rounds must be between {} and {}",
                 MIN_BCRYPT_ROUNDS, MAX_BCRYPT_ROUNDS
@@ -92,6 +92,78 @@ impl SshPrivateKey {
     /// Get the public key bytes
     pub fn public_key_bytes(&self) -> Vec<u8> {
         self.inner.public_key().to_bytes().unwrap_or_default()
+    }
+
+    /// Convert to wire format for signing operations
+    pub fn to_wire_format(&self) -> Result<Vec<u8>> {
+        let mut wire_data = Vec::new();
+
+        // Helper function to write length-prefixed strings (wire format)
+        let write_string = |buf: &mut Vec<u8>, data: &[u8]| {
+            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            buf.extend_from_slice(data);
+        };
+
+        match self.inner.algorithm() {
+            ssh_key::Algorithm::Ed25519 => {
+                // Write key type
+                write_string(&mut wire_data, b"ssh-ed25519");
+
+                // Get the public key (32 bytes)
+                let public_key_bytes = self.public_key_bytes();
+                // Skip the algorithm identifier and length prefix to get raw 32 bytes
+                if public_key_bytes.len() < 32 {
+                    return Err(Error::Internal("Invalid Ed25519 public key length".to_string()));
+                }
+                let raw_public = &public_key_bytes[public_key_bytes.len() - 32..];
+                write_string(&mut wire_data, raw_public);
+
+                // Get the private key components
+                let ed25519_keypair = match self.inner.key_data().ed25519() {
+                    Some(keypair) => keypair,
+                    None => return Err(Error::Internal("Failed to get Ed25519 key data".to_string())),
+                };
+
+                let private_bytes = ed25519_keypair.private.to_bytes();
+                // For public key, use the same raw_public we extracted above
+
+                // Ed25519 wire format expects 64 bytes: private (32) + public (32)
+                let mut combined_private = Vec::with_capacity(64);
+                combined_private.extend_from_slice(&private_bytes);
+                combined_private.extend_from_slice(raw_public);
+
+                write_string(&mut wire_data, &combined_private);
+            }
+            ssh_key::Algorithm::Rsa { .. } => {
+                // Write key type
+                write_string(&mut wire_data, b"ssh-rsa");
+
+                // Get RSA key components
+                let rsa_keypair = match self.inner.key_data().rsa() {
+                    Some(keypair) => keypair,
+                    None => return Err(Error::Internal("Failed to get RSA key data".to_string())),
+                };
+
+                // Write RSA components in the order expected by signing code
+                // n (modulus)
+                write_string(&mut wire_data, rsa_keypair.public.n.as_bytes());
+                // e (public exponent)
+                write_string(&mut wire_data, rsa_keypair.public.e.as_bytes());
+                // d (private exponent)
+                write_string(&mut wire_data, rsa_keypair.private.d.as_bytes());
+                // iqmp (inverse of q mod p)
+                write_string(&mut wire_data, rsa_keypair.private.iqmp.as_bytes());
+                // p (first prime)
+                write_string(&mut wire_data, rsa_keypair.private.p.as_bytes());
+                // q (second prime)
+                write_string(&mut wire_data, rsa_keypair.private.q.as_bytes());
+            }
+            _ => {
+                return Err(Error::Internal(format!("Unsupported algorithm: {:?}", self.inner.algorithm())));
+            }
+        }
+
+        Ok(wire_data)
     }
 
     /// Get the algorithm

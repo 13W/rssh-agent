@@ -28,7 +28,7 @@ impl DaemonCommand {
 
         // Load config to verify it's valid
         let config_json = std::fs::read_to_string(&config_path)?;
-        let _config: Config = serde_json::from_str(&config_json)?;
+        let config: Config = serde_json::from_str(&config_json)?;
 
         // Determine shell style
         let shell_style = if sh {
@@ -46,6 +46,7 @@ impl DaemonCommand {
             socket_path: socket,
             foreground,
             storage_dir: storage_dir.to_string_lossy().to_string(),
+            config,
         };
 
         // Run the daemon

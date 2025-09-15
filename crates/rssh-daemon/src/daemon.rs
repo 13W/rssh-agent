@@ -15,6 +15,7 @@ pub struct DaemonConfig {
     pub socket_path: Option<String>,
     pub foreground: bool,
     pub storage_dir: String,
+    pub config: rssh_core::config::Config,
 }
 
 /// Shell output style
@@ -56,8 +57,16 @@ impl ShellStyle {
 
 /// Run the daemon
 pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -> Result<()> {
-    // Create the agent with storage directory
-    let agent = Arc::new(Agent::with_storage_dir(config.storage_dir.clone()));
+    // Create shutdown signal that will be shared between agent and signal handlers
+    let shutdown_signal = Arc::new(tokio::sync::Notify::new());
+
+    // Create the agent with storage directory and shutdown signal
+    // Agent starts in locked state and master password will be set when needed
+    let agent = Arc::new(Agent::with_storage_dir_and_shutdown(
+        config.storage_dir.clone(),
+        config.config.clone(),
+        shutdown_signal.clone(),
+    ));
 
     // Create the socket server
     let server = if let Some(socket_path) = config.socket_path {
@@ -68,10 +77,9 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
         SocketServer::new(socket_path.into(), agent.clone())
     } else {
         // No explicit socket path, check SSH_AUTH_SOCK
-        if let Ok(existing_sock) = std::env::var("SSH_AUTH_SOCK") {
-            if check_socket_alive(&existing_sock).await {
-                return Err(Error::AlreadyRunning);
-            }
+        if let Ok(existing_sock) = std::env::var("SSH_AUTH_SOCK")
+            && check_socket_alive(&existing_sock).await {
+            return Err(Error::AlreadyRunning);
         }
         SocketServer::create_temp_socket(agent.clone())?
     };
@@ -107,11 +115,14 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
             }
         }
     } else {
-        // Foreground mode: print socket info
+        // Foreground mode: print socket info and continue
         let style = shell_style.unwrap_or_else(ShellStyle::detect);
         println!("{}", style.format_export(&socket_path));
         io::stdout().flush()?;
     }
+
+    // Apply security hardening
+    apply_hardening(false)?; // Default to non-strict memory locking
 
     // Set up signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -122,23 +133,51 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     let server_for_cleanup = Arc::new(server);
     let server_for_run = server_for_cleanup.clone();
 
-    // Spawn signal handler task
+    // Spawn enhanced signal handler task
+    let shutdown_signal_clone = shutdown_signal.clone();
+
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = sigterm.recv() => {
-                    tracing::info!("Received SIGTERM, shutting down");
+                    tracing::info!("Received SIGTERM, initiating graceful shutdown");
+
+                    // Shutdown the agent with proper secret zeroization
+                    if let Err(e) = agent_for_signals.shutdown().await {
+                        tracing::error!("Failed to shutdown agent cleanly: {}", e);
+                    }
+
+                    // Signal main loop to stop
                     RUNNING.store(false, Ordering::Relaxed);
+                    shutdown_signal_clone.notify_one();
                     break;
                 }
                 _ = sigint.recv() => {
-                    tracing::info!("Received SIGINT, shutting down");
+                    tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
+
+                    // Shutdown the agent with proper secret zeroization
+                    if let Err(e) = agent_for_signals.shutdown().await {
+                        tracing::error!("Failed to shutdown agent cleanly: {}", e);
+                    }
+
+                    // Signal main loop to stop
                     RUNNING.store(false, Ordering::Relaxed);
+                    shutdown_signal_clone.notify_one();
                     break;
                 }
                 _ = sighup.recv() => {
-                    tracing::info!("Received SIGHUP, locking agent");
-                    let _ = agent_for_signals.handle_message(&[22]).await; // Lock message
+                    tracing::info!("Received SIGHUP, locking agent for configuration reload");
+
+                    // Lock the agent (compatible with OpenSSH behavior)
+                    let lock_message = [22u8]; // SSH_AGENTC_LOCK message type
+                    match agent_for_signals.handle_message(&lock_message).await {
+                        Ok(_) => {
+                            tracing::info!("Agent locked successfully due to SIGHUP");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to lock agent on SIGHUP: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -147,21 +186,43 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     // Run the server
     let server_task = tokio::spawn(async move { server_for_run.run().await });
 
-    // Wait for shutdown signal
-    while RUNNING.load(Ordering::Relaxed) {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    // Wait for shutdown signal or server completion
+    tokio::select! {
+        _ = shutdown_signal.notified() => {
+            tracing::info!("Shutdown signal received, stopping server");
+        }
+        result = server_task => {
+            match result {
+                Ok(Ok(())) => {
+                    tracing::info!("Server task completed successfully");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Server task failed: {}", e);
+                }
+                Err(e) => {
+                    tracing::error!("Server task panicked: {}", e);
+                }
+            }
+        }
     }
 
-    // Graceful shutdown
-    tracing::info!("Shutting down daemon");
+    // Graceful shutdown sequence
+    tracing::info!("Starting graceful shutdown sequence");
 
-    // Cancel the server task
-    server_task.abort();
-    let _ = server_task.await;
+    // Stop the running flag
+    RUNNING.store(false, Ordering::Relaxed);
+
+    // Give server a moment to finish current operations
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
     // Clean up socket
-    server_for_cleanup.cleanup()?;
+    if let Err(e) = server_for_cleanup.cleanup() {
+        tracing::warn!("Failed to cleanup socket: {}", e);
+    } else {
+        tracing::debug!("Socket cleaned up successfully");
+    }
 
+    tracing::info!("Daemon shutdown completed");
     Ok(())
 }
 

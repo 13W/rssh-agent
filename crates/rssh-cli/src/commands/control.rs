@@ -1,6 +1,6 @@
 use rssh_core::{Error, Result};
 use rssh_daemon::prompt::{PrompterDecision, SecureString};
-use rssh_proto::wire;
+use rssh_proto::{cbor::ExtensionRequest, wire};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
@@ -12,7 +12,7 @@ impl LockCommand {
     pub fn execute(socket_path: Option<String>) -> Result<()> {
         let socket = resolve_socket_path(socket_path)?;
 
-        // Build lock message (empty passphrase as per OpenSSH)
+        // Build lock message (no passphrase needed per rssh-agent spec)
         let mut msg = vec![wire::MessageType::Lock as u8];
         wire::write_string(&mut msg, b"");
 
@@ -34,18 +34,18 @@ impl UnlockCommand {
     pub fn execute(socket_path: Option<String>, pass_fd: Option<i32>) -> Result<()> {
         let socket = resolve_socket_path(socket_path)?;
 
-        // Get master password
+        // Get master password for unlock
         let password = if let Some(fd) = pass_fd {
             // Read from file descriptor
             read_password_from_fd(fd)?
         } else {
-            // Prompt for password
+            // Prompt for master password
             let prompter = PrompterDecision::choose()
                 .ok_or_else(|| Error::Config("No prompt method available".into()))?;
             prompter.prompt("Enter master password")?
         };
 
-        // Build unlock message
+        // Build unlock message with master password
         let mut msg = vec![wire::MessageType::Unlock as u8];
         wire::write_string(&mut msg, password.as_str().as_bytes());
 
@@ -68,23 +68,29 @@ impl StopCommand {
         let socket = resolve_socket_path(socket_path)?;
 
         // Build extension message for shutdown
-        let mut msg = vec![wire::MessageType::Extension as u8];
-        wire::write_string(&mut msg, b"rssh-agent@local");
+        let request = ExtensionRequest {
+            extension: "control.shutdown".to_string(),
+            data: vec![], // No additional data needed for shutdown
+        };
 
-        // CBOR payload for control.shutdown
-        let payload = ciborium::Value::Map(vec![(
-            ciborium::Value::Text("op".to_string()),
-            ciborium::Value::Text("control.shutdown".to_string()),
-        )]);
-
-        let mut cbor_bytes = Vec::new();
-        ciborium::into_writer(&payload, &mut cbor_bytes)
+        let mut cbor_data = Vec::new();
+        ciborium::into_writer(&request, &mut cbor_data)
             .map_err(|e| Error::Internal(e.to_string()))?;
 
-        wire::write_string(&mut msg, &cbor_bytes);
+        // Build SSH protocol message with extension namespace
+        let mut message = Vec::new();
+        message.push(rssh_proto::messages::SSH_AGENTC_EXTENSION);
+
+        // Add extension namespace
+        let ext_namespace = b"rssh-agent@local";
+        message.extend_from_slice(&(ext_namespace.len() as u32).to_be_bytes());
+        message.extend_from_slice(ext_namespace);
+
+        // Add CBOR data
+        message.extend_from_slice(&cbor_data);
 
         // Send with timeout
-        match send_agent_message_timeout(&socket, &msg, Duration::from_secs(5)) {
+        match send_agent_message_timeout(&socket, &message, Duration::from_secs(5)) {
             Ok(_) => {
                 println!("Agent shutdown initiated");
                 Ok(())

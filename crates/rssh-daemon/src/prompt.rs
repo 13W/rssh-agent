@@ -18,9 +18,10 @@ impl SecureString {
     }
 }
 
-/// Trait for password prompting
+/// Trait for password prompting and confirmations
 pub trait Prompter: Send + Sync {
     fn prompt(&self, prompt_text: &str) -> Result<SecureString>;
+    fn confirm(&self, prompt_text: &str) -> Result<bool>;
 }
 
 /// TTY prompter using rpassword
@@ -31,13 +32,32 @@ impl Prompter for TtyPrompter {
         print!("{}: ", prompt_text);
         std::io::stdout().flush()?;
 
-        let password = rpassword::read_password().map_err(|e| Error::Io(e))?;
+        let password = rpassword::read_password().map_err(Error::Io)?;
 
         if password.is_empty() {
             return Err(Error::BadArgs);
         }
 
         Ok(SecureString::new(password))
+    }
+
+    fn confirm(&self, prompt_text: &str) -> Result<bool> {
+        loop {
+            print!("{} (y/n): ", prompt_text);
+            std::io::stdout().flush()?;
+            
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            
+            match input.trim().to_lowercase().as_str() {
+                "y" | "yes" => return Ok(true),
+                "n" | "no" => return Ok(false),
+                _ => {
+                    println!("Please enter 'y' or 'n'");
+                    continue;
+                }
+            }
+        }
     }
 }
 
@@ -89,6 +109,47 @@ impl Prompter for AskpassPrompter {
 
         Ok(SecureString::new(password))
     }
+
+    fn confirm(&self, prompt_text: &str) -> Result<bool> {
+        // For ASKPASS programs, we'll prompt with instructions and expect y/n response
+        let confirmation_prompt = format!("{} (Enter 'y' for yes, 'n' for no)", prompt_text);
+        
+        let mut child = Command::new(&self.program)
+            .arg(&confirmation_prompt)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Internal("Failed to capture stdout".into()))?;
+
+        let mut reader = BufReader::new(stdout);
+        let mut response = String::new();
+        reader.read_line(&mut response)?;
+
+        let status = child.wait()?;
+        if !status.success() {
+            // Treat program failure as denial
+            return Ok(false);
+        }
+
+        // Trim trailing newline
+        if response.ends_with('\n') {
+            response.pop();
+        }
+        if response.ends_with('\r') {
+            response.pop();
+        }
+
+        // Accept y/yes as confirmation, everything else as denial
+        match response.trim().to_lowercase().as_str() {
+            "y" | "yes" => Ok(true),
+            _ => Ok(false),
+        }
+    }
 }
 
 /// Decision logic for choosing prompter based on environment
@@ -111,8 +172,8 @@ impl PrompterDecision {
         }
 
         // Check if we have SSH_ASKPASS
-        if let Ok(askpass_prog) = env::var("SSH_ASKPASS") {
-            if !askpass_prog.is_empty() {
+        if let Ok(askpass_prog) = env::var("SSH_ASKPASS")
+            && !askpass_prog.is_empty() {
                 // Check conditions for using ASKPASS
                 let has_tty = atty::is(atty::Stream::Stdin);
                 let has_display = env::var("DISPLAY").is_ok();
@@ -130,7 +191,6 @@ impl PrompterDecision {
                     return Some(Box::new(AskpassPrompter::new(askpass_prog)));
                 }
             }
-        }
 
         // Fall back to TTY if available
         if atty::is(atty::Stream::Stdin) {
