@@ -24,6 +24,7 @@ pub struct ManagedKey {
     pub loaded: bool,
     pub has_disk: bool,
     pub has_cert: bool,
+    pub password_protected: bool, // Whether key on disk is password-protected
     pub constraints: serde_json::Value, // Object with confirm and lifetime_expires_at
     pub created: Option<String>,
     pub updated: Option<String>,
@@ -92,6 +93,27 @@ pub struct ManageDeleteRequest {
 /// Response for manage.delete operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManageDeleteResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+/// Request for manage.set_password operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManageSetPasswordRequest {
+    pub fp_sha256_hex: String,
+    pub set_password_protection: bool, // true to set password, false to remove
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_key_pass_b64: Option<String>, // Required if set_password_protection is true
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_key_pass_b64: Option<String>, // Required if key is currently password-protected
+}
+
+/// Response for manage.set_password operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManageSetPasswordResponse {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

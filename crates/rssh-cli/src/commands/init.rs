@@ -58,10 +58,10 @@ fn resolve_storage_dir(dir: Option<String>) -> Result<PathBuf> {
 }
 
 fn expand_path(path: &str) -> Result<PathBuf> {
-    let expanded = if path.starts_with("~/") {
+    let expanded = if let Some(stripped) = path.strip_prefix("~/") {
         let home = std::env::var("HOME")
             .map_err(|_| Error::Config("HOME environment variable not set".into()))?;
-        PathBuf::from(home).join(&path[2..])
+        PathBuf::from(home).join(stripped)
     } else {
         PathBuf::from(path)
     };

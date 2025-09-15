@@ -109,18 +109,7 @@ impl SshPrivateKey {
                 // Write key type
                 write_string(&mut wire_data, b"ssh-ed25519");
 
-                // Get the public key (32 bytes)
-                let public_key_bytes = self.public_key_bytes();
-                // Skip the algorithm identifier and length prefix to get raw 32 bytes
-                if public_key_bytes.len() < 32 {
-                    return Err(Error::Internal(
-                        "Invalid Ed25519 public key length".to_string(),
-                    ));
-                }
-                let raw_public = &public_key_bytes[public_key_bytes.len() - 32..];
-                write_string(&mut wire_data, raw_public);
-
-                // Get the private key components
+                // Get the Ed25519 keypair directly to access raw key material
                 let ed25519_keypair = match self.inner.key_data().ed25519() {
                     Some(keypair) => keypair,
                     None => {
@@ -130,8 +119,23 @@ impl SshPrivateKey {
                     }
                 };
 
+                // Get raw public key bytes (32 bytes) by extracting from the SSH public key
+                let public_key_wire = self.inner.public_key().to_bytes().map_err(|e| {
+                    Error::Internal(format!("Failed to get public key bytes: {}", e))
+                })?;
+
+                // SSH Ed25519 public key format: 4-byte length + "ssh-ed25519" + 4-byte length + 32-byte key
+                // Extract the raw 32 bytes from the end
+                if public_key_wire.len() < 32 {
+                    return Err(Error::Internal(
+                        "Invalid Ed25519 public key format".to_string(),
+                    ));
+                }
+                let raw_public = &public_key_wire[public_key_wire.len() - 32..];
+                write_string(&mut wire_data, raw_public);
+
+                // Get the private key (32 bytes) and combine with public (32 bytes) = 64 bytes total
                 let private_bytes = ed25519_keypair.private.to_bytes();
-                // For public key, use the same raw_public we extracted above
 
                 // Ed25519 wire format expects 64 bytes: private (32) + public (32)
                 let mut combined_private = Vec::with_capacity(64);

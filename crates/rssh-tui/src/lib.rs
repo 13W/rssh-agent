@@ -27,6 +27,7 @@ pub struct KeyInfo {
     pub loaded: bool,
     pub has_disk: bool,
     pub has_cert: bool,
+    pub password_protected: bool, // Whether key on disk is password-protected
     pub constraints: serde_json::Value,
     pub created: Option<String>,
     pub updated: Option<String>,
@@ -42,6 +43,7 @@ pub struct App {
     pub input_buffer: String,
     pub should_quit: bool,
     pub key_being_loaded: Option<String>, // Fingerprint of key being loaded with password
+    pub key_load_password: Option<String>, // Temporarily stores password for loading operations
     pub old_password_buffer: String,      // For change password workflow
     pub create_key_type: Option<String>,  // For key creation workflow
     pub create_bit_length: Option<u32>,   // For RSA key creation
@@ -50,6 +52,10 @@ pub struct App {
     pub constraint_lifetime: Option<String>, // User-friendly format like "2h", "1d"
     pub constraint_step: ConstraintStep,
     pub constraint_context: ConstraintContext,
+    // Key password management state
+    pub key_password_buffer: String, // For setting key passwords
+    pub key_being_protected: Option<String>, // Fingerprint of key being password-protected
+    pub import_with_password: bool,  // Whether to set password during import
 }
 
 // Constraint helper functions
@@ -167,6 +173,11 @@ pub enum InputMode {
     ConstraintsLoad,
     ConstraintsCreate,
     LifetimeInput,
+    SetKeyPassword,
+    ConfirmKeyPassword,
+    RemoveKeyPassword,
+    ImportKeyPassword,
+    ImportKeyPasswordConfirm,
 }
 
 impl Default for App {
@@ -190,6 +201,7 @@ impl App {
             input_buffer: String::new(),
             should_quit: false,
             key_being_loaded: None,
+            key_load_password: None,
             old_password_buffer: String::new(),
             create_key_type: None,
             create_bit_length: None,
@@ -197,6 +209,9 @@ impl App {
             constraint_lifetime: None,
             constraint_step: ConstraintStep::SelectOptions,
             constraint_context: ConstraintContext::Create,
+            key_password_buffer: String::new(),
+            key_being_protected: None,
+            import_with_password: false,
         }
     }
 
@@ -313,7 +328,9 @@ fn run_app<B: Backend>(
                         {
                             let key = &app.keys[idx];
                             if !key.has_disk {
-                                app.set_status("Cannot delete external keys (use ssh-add -d)".to_string());
+                                app.set_status(
+                                    "Cannot delete external keys (use ssh-add -d)".to_string(),
+                                );
                             } else {
                                 app.input_mode = InputMode::Confirm;
                                 app.set_status(format!(
@@ -352,6 +369,7 @@ fn run_app<B: Backend>(
                             // Extract key info first to avoid borrow conflicts
                             let has_disk = app.keys[idx].has_disk;
                             let is_loaded = app.keys[idx].loaded;
+                            let password_protected = app.keys[idx].password_protected;
                             let fingerprint = app.keys[idx].fingerprint.clone();
 
                             // Check if key is on disk but not loaded
@@ -359,8 +377,19 @@ fn run_app<B: Backend>(
                                 app.set_status("Key is not on disk".to_string());
                             } else if is_loaded {
                                 app.set_status("Key is already loaded".to_string());
+                            } else if password_protected {
+                                // Key is password-protected, prompt for password immediately
+                                app.reset_constraints();
+                                app.constraint_context =
+                                    ConstraintContext::Load(fingerprint.clone());
+                                app.input_mode = InputMode::KeyPassword;
+                                app.input_buffer.clear();
+                                app.key_being_loaded = Some(fingerprint);
+                                app.set_status(
+                                    "Key is password-protected. Enter password:".to_string(),
+                                );
                             } else {
-                                // Enter constraint dialog
+                                // Key is not password-protected, enter constraint dialog
                                 app.reset_constraints();
                                 app.constraint_context = ConstraintContext::Load(fingerprint);
                                 app.input_mode = InputMode::ConstraintsLoad;
@@ -381,15 +410,13 @@ fn run_app<B: Backend>(
                                     "Only external keys (added via ssh-add) can be imported"
                                         .to_string(),
                                 );
-                            } else if let Err(e) =
-                                import_key(socket_path.as_ref(), &key.fingerprint)
-                            {
-                                app.set_status(format!("Failed to import key: {}", e));
                             } else {
-                                app.set_status("Key imported successfully".to_string());
-                                if let Err(e) = load_keys(app, socket_path.as_ref()) {
-                                    app.set_status(format!("Failed to refresh: {}", e));
-                                }
+                                // Ask if user wants password protection
+                                app.set_status(
+                                    "Import with password protection? (y/n/Enter=no)".to_string(),
+                                );
+                                app.input_mode = InputMode::Confirm;
+                                app.import_with_password = false;
                             }
                         }
                     }
@@ -466,6 +493,51 @@ fn run_app<B: Backend>(
                         app.constraint_step = ConstraintStep::SelectOptions;
                         app.set_status("Configure constraints: (c)onfirm, (l)ifetime, (Enter) to continue, (s)kip constraints".to_string());
                     }
+                    KeyCode::Char('P') => {
+                        // Set password protection on selected key
+                        if let Some(idx) = app.selected_key
+                            && idx < app.keys.len()
+                        {
+                            let key = &app.keys[idx];
+                            if !key.has_disk {
+                                app.set_status(
+                                    "Only stored keys can be password-protected".to_string(),
+                                );
+                            } else if key.password_protected {
+                                app.set_status("Key is already password-protected".to_string());
+                            } else {
+                                app.input_mode = InputMode::SetKeyPassword;
+                                app.input_buffer.clear();
+                                app.key_password_buffer.clear();
+                                app.key_being_protected = Some(key.fingerprint.clone());
+                                app.set_status("Enter password for key protection:".to_string());
+                            }
+                        }
+                    }
+                    KeyCode::Char('R') => {
+                        // Remove password protection from selected key
+                        if let Some(idx) = app.selected_key
+                            && idx < app.keys.len()
+                        {
+                            let key = &app.keys[idx];
+                            if !key.has_disk {
+                                app.set_status(
+                                    "Only stored keys can have password protection removed"
+                                        .to_string(),
+                                );
+                            } else if !key.password_protected {
+                                app.set_status("Key is not password-protected".to_string());
+                            } else {
+                                app.input_mode = InputMode::RemoveKeyPassword;
+                                app.input_buffer.clear();
+                                app.key_being_protected = Some(key.fingerprint.clone());
+                                app.set_status(format!(
+                                    "Enter current password for key {}:",
+                                    key.fingerprint
+                                ));
+                            }
+                        }
+                    }
                     KeyCode::Esc => {
                         app.show_help = false;
                     }
@@ -492,13 +564,15 @@ fn run_app<B: Backend>(
                             let result = load_disk_key_with_constraints(
                                 socket_path.as_ref(),
                                 fingerprint,
-                                None,
+                                app.key_load_password.as_deref(),
                                 app.constraint_confirm,
                                 app.constraint_lifetime.as_deref(),
                             );
                             handle_load_result(app, socket_path.as_ref(), result);
                         }
                         app.input_mode = InputMode::Normal;
+                        app.key_being_loaded = None;
+                        app.key_load_password = None;
                     }
                     KeyCode::Char('s') | KeyCode::Char('S') => {
                         // Skip constraints, load without constraints
@@ -506,16 +580,20 @@ fn run_app<B: Backend>(
                             let result = load_disk_key_with_constraints(
                                 socket_path.as_ref(),
                                 fingerprint,
-                                None,
+                                app.key_load_password.as_deref(),
                                 false,
                                 None,
                             );
                             handle_load_result(app, socket_path.as_ref(), result);
                         }
                         app.input_mode = InputMode::Normal;
+                        app.key_being_loaded = None;
+                        app.key_load_password = None;
                     }
                     KeyCode::Esc => {
                         app.input_mode = InputMode::Normal;
+                        app.key_being_loaded = None;
+                        app.key_load_password = None;
                         app.clear_status();
                     }
                     _ => {}
@@ -639,49 +717,67 @@ fn run_app<B: Backend>(
                     }
                     _ => {}
                 },
-                InputMode::KeyPassword => match key.code {
-                    KeyCode::Enter => {
-                        if let Some(ref fingerprint) = app.key_being_loaded.clone() {
-                            let result = if app.has_constraints() {
-                                load_disk_key_with_constraints(
-                                    socket_path.as_ref(),
-                                    fingerprint,
-                                    Some(&app.input_buffer),
-                                    app.constraint_confirm,
-                                    app.constraint_lifetime.as_deref(),
-                                )
-                            } else {
-                                load_disk_key(
-                                    socket_path.as_ref(),
-                                    fingerprint,
-                                    Some(&app.input_buffer),
-                                )
-                            };
-                            handle_load_result(app, socket_path.as_ref(), result);
+                InputMode::KeyPassword => {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if let Some(ref fingerprint) = app.key_being_loaded.clone() {
+                                // Store the password for later use
+                                app.key_load_password = Some(app.input_buffer.clone());
+
+                                // Check if this is a Load context that should go to constraints
+                                if matches!(app.constraint_context, ConstraintContext::Load(_)) {
+                                    // Go to constraints UI with the password stored
+                                    app.input_mode = InputMode::ConstraintsLoad;
+                                    app.constraint_step = ConstraintStep::SelectOptions;
+                                    app.set_status("Constraints | (c)onfirm, (l)ifetime, (Enter) to load, (s)kip".to_string());
+                                } else {
+                                    // Load immediately if no constraints context
+                                    let result = load_disk_key(
+                                        socket_path.as_ref(),
+                                        fingerprint,
+                                        app.key_load_password.as_deref(),
+                                    );
+                                    handle_load_result(app, socket_path.as_ref(), result);
+                                    app.input_mode = InputMode::Normal;
+                                    app.key_being_loaded = None;
+                                    app.key_load_password = None;
+                                }
+                            }
+                            app.input_buffer.clear();
                         }
-                        app.input_buffer.clear();
-                        app.input_mode = InputMode::Normal;
-                        app.key_being_loaded = None;
+                        KeyCode::Esc => {
+                            app.input_buffer.clear();
+                            app.input_mode = InputMode::Normal;
+                            app.key_being_loaded = None;
+                            app.key_load_password = None;
+                            app.clear_status();
+                        }
+                        KeyCode::Char(c) => {
+                            app.input_buffer.push(c);
+                        }
+                        KeyCode::Backspace => {
+                            app.input_buffer.pop();
+                        }
+                        _ => {}
                     }
-                    KeyCode::Esc => {
-                        app.input_buffer.clear();
-                        app.input_mode = InputMode::Normal;
-                        app.key_being_loaded = None;
-                        app.clear_status();
-                    }
-                    KeyCode::Char(c) => {
-                        app.input_buffer.push(c);
-                    }
-                    KeyCode::Backspace => {
-                        app.input_buffer.pop();
-                    }
-                    _ => {}
-                },
+                }
                 InputMode::Confirm => match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') => {
-                        if let Some(idx) = app.selected_key
+                        if app
+                            .status_message
+                            .as_ref()
+                            .is_some_and(|s| s.contains("Import with password"))
+                        {
+                            // Handle import with password protection
+                            app.import_with_password = true;
+                            app.input_mode = InputMode::ImportKeyPassword;
+                            app.input_buffer.clear();
+                            app.key_password_buffer.clear();
+                            app.set_status("Enter password for imported key:".to_string());
+                        } else if let Some(idx) = app.selected_key
                             && idx < app.keys.len()
                         {
+                            // Handle key deletion
                             if let Err(e) =
                                 remove_key(socket_path.as_ref(), &app.keys[idx].fingerprint)
                             {
@@ -692,10 +788,56 @@ fn run_app<B: Backend>(
                                     app.set_status(format!("Failed to refresh: {}", e));
                                 }
                             }
+                            app.input_mode = InputMode::Normal;
+                        }
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') => {
+                        if app
+                            .status_message
+                            .as_ref()
+                            .is_some_and(|s| s.contains("Import with password"))
+                        {
+                            // Handle import without password protection
+                            if let Some(idx) = app.selected_key
+                                && idx < app.keys.len()
+                            {
+                                let key = &app.keys[idx];
+                                if let Err(e) = import_key(socket_path.as_ref(), &key.fingerprint) {
+                                    app.set_status(format!("Failed to import key: {}", e));
+                                } else {
+                                    app.set_status("Key imported successfully".to_string());
+                                    if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                        app.set_status(format!("Failed to refresh: {}", e));
+                                    }
+                                }
+                            }
                         }
                         app.input_mode = InputMode::Normal;
                     }
-                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    KeyCode::Enter => {
+                        if app
+                            .status_message
+                            .as_ref()
+                            .is_some_and(|s| s.contains("Import with password"))
+                        {
+                            // Handle import without password protection (default)
+                            if let Some(idx) = app.selected_key
+                                && idx < app.keys.len()
+                            {
+                                let key = &app.keys[idx];
+                                if let Err(e) = import_key(socket_path.as_ref(), &key.fingerprint) {
+                                    app.set_status(format!("Failed to import key: {}", e));
+                                } else {
+                                    app.set_status("Key imported successfully".to_string());
+                                    if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                        app.set_status(format!("Failed to refresh: {}", e));
+                                    }
+                                }
+                            }
+                        }
+                        app.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Esc => {
                         app.input_mode = InputMode::Normal;
                         app.clear_status();
                     }
@@ -945,6 +1087,199 @@ fn run_app<B: Backend>(
                     }
                     _ => {}
                 },
+                InputMode::SetKeyPassword => match key.code {
+                    KeyCode::Enter => {
+                        if app.input_buffer.is_empty() {
+                            app.set_status("Password cannot be empty".to_string());
+                        } else {
+                            app.key_password_buffer = app.input_buffer.clone();
+                            app.input_buffer.clear();
+                            app.input_mode = InputMode::ConfirmKeyPassword;
+                            app.set_status("Confirm password:".to_string());
+                        }
+                    }
+                    KeyCode::Esc => {
+                        app.input_buffer.clear();
+                        app.key_password_buffer.clear();
+                        app.key_being_protected = None;
+                        app.input_mode = InputMode::Normal;
+                        app.clear_status();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    _ => {}
+                },
+                InputMode::ConfirmKeyPassword => match key.code {
+                    KeyCode::Enter => {
+                        if app.input_buffer != app.key_password_buffer {
+                            app.set_status("Passwords do not match. Try again.".to_string());
+                            app.input_buffer.clear();
+                            app.key_password_buffer.clear();
+                            app.input_mode = InputMode::SetKeyPassword;
+                            app.set_status("Enter password for key protection:".to_string());
+                        } else if let Some(ref fingerprint) = app.key_being_protected.clone() {
+                            match set_key_password(
+                                socket_path.as_ref(),
+                                fingerprint,
+                                &app.input_buffer,
+                            ) {
+                                Ok(()) => {
+                                    app.set_status(
+                                        "Key password protection set successfully".to_string(),
+                                    );
+                                    if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                        app.set_status(format!("Failed to refresh: {}", e));
+                                    }
+                                }
+                                Err(e) => {
+                                    app.set_status(format!("Failed to set key password: {}", e));
+                                }
+                            }
+                            app.input_buffer.clear();
+                            app.key_password_buffer.clear();
+                            app.key_being_protected = None;
+                            app.input_mode = InputMode::Normal;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        app.input_buffer.clear();
+                        app.key_password_buffer.clear();
+                        app.key_being_protected = None;
+                        app.input_mode = InputMode::Normal;
+                        app.clear_status();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    _ => {}
+                },
+                InputMode::RemoveKeyPassword => match key.code {
+                    KeyCode::Enter => {
+                        if let Some(ref fingerprint) = app.key_being_protected.clone() {
+                            let current_password = app.input_buffer.clone();
+                            match remove_key_password(
+                                socket_path.as_ref(),
+                                fingerprint,
+                                &current_password,
+                            ) {
+                                Ok(()) => {
+                                    app.set_status(
+                                        "Key password protection removed successfully".to_string(),
+                                    );
+                                    if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                        app.set_status(format!("Failed to refresh: {}", e));
+                                    }
+                                }
+                                Err(e) => {
+                                    app.set_status(format!("Failed to remove key password: {}", e));
+                                }
+                            }
+                        }
+                        app.key_being_protected = None;
+                        app.input_buffer.clear();
+                        app.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Esc => {
+                        app.key_being_protected = None;
+                        app.input_buffer.clear();
+                        app.input_mode = InputMode::Normal;
+                        app.clear_status();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    _ => {}
+                },
+                InputMode::ImportKeyPassword => match key.code {
+                    KeyCode::Enter => {
+                        if app.input_buffer.is_empty() {
+                            app.set_status("Password cannot be empty".to_string());
+                        } else {
+                            app.key_password_buffer = app.input_buffer.clone();
+                            app.input_buffer.clear();
+                            app.input_mode = InputMode::ImportKeyPasswordConfirm;
+                            app.set_status("Confirm import password:".to_string());
+                        }
+                    }
+                    KeyCode::Esc => {
+                        app.input_buffer.clear();
+                        app.key_password_buffer.clear();
+                        app.import_with_password = false;
+                        app.input_mode = InputMode::Normal;
+                        app.clear_status();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    _ => {}
+                },
+                InputMode::ImportKeyPasswordConfirm => match key.code {
+                    KeyCode::Enter => {
+                        if app.input_buffer != app.key_password_buffer {
+                            app.set_status("Passwords do not match. Try again.".to_string());
+                            app.input_buffer.clear();
+                            app.key_password_buffer.clear();
+                            app.input_mode = InputMode::ImportKeyPassword;
+                            app.set_status("Enter password for imported key:".to_string());
+                        } else if let Some(idx) = app.selected_key
+                            && idx < app.keys.len()
+                        {
+                            let key = &app.keys[idx];
+                            match import_key_with_password(
+                                socket_path.as_ref(),
+                                &key.fingerprint,
+                                &app.input_buffer,
+                            ) {
+                                Ok(()) => {
+                                    app.set_status(
+                                        "Key imported with password protection successfully"
+                                            .to_string(),
+                                    );
+                                    if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                        app.set_status(format!("Failed to refresh: {}", e));
+                                    }
+                                }
+                                Err(e) => {
+                                    app.set_status(format!(
+                                        "Failed to import key with password: {}",
+                                        e
+                                    ));
+                                }
+                            }
+                            app.input_buffer.clear();
+                            app.key_password_buffer.clear();
+                            app.import_with_password = false;
+                            app.input_mode = InputMode::Normal;
+                        }
+                    }
+                    KeyCode::Esc => {
+                        app.input_buffer.clear();
+                        app.key_password_buffer.clear();
+                        app.import_with_password = false;
+                        app.input_mode = InputMode::Normal;
+                        app.clear_status();
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    _ => {}
+                },
             }
         }
 
@@ -1042,6 +1377,14 @@ fn ui(f: &mut Frame, app: &App) {
                 Span::raw("      Create new key"),
             ]),
             Line::from(vec![
+                Span::styled("P", Style::default().fg(Color::Yellow)),
+                Span::raw("      Set password protection on key"),
+            ]),
+            Line::from(vec![
+                Span::styled("R", Style::default().fg(Color::Yellow)),
+                Span::raw("      Remove password protection from key"),
+            ]),
+            Line::from(vec![
                 Span::styled("d/Del", Style::default().fg(Color::Yellow)),
                 Span::raw("  Permanently delete key from disk"),
             ]),
@@ -1130,6 +1473,11 @@ fn ui(f: &mut Frame, app: &App) {
                     spans.push(Span::styled(" [CERT]", Style::default().fg(Color::Magenta)));
                 }
 
+                // Show if password protected
+                if key.password_protected {
+                    spans.push(Span::styled(" [🔒]", Style::default().fg(Color::Blue)));
+                }
+
                 // Show constraints if any
                 if let Some(confirm) = key.constraints.get("confirm").and_then(|v| v.as_bool())
                     && confirm
@@ -1160,6 +1508,25 @@ fn ui(f: &mut Frame, app: &App) {
         format!("Password: {}", "*".repeat(app.input_buffer.len()))
     } else if app.input_mode == InputMode::KeyPassword {
         format!("Key password: {}", "*".repeat(app.input_buffer.len()))
+    } else if app.input_mode == InputMode::SetKeyPassword {
+        format!("Set key password: {}", "*".repeat(app.input_buffer.len()))
+    } else if app.input_mode == InputMode::ConfirmKeyPassword {
+        format!(
+            "Confirm key password: {}",
+            "*".repeat(app.input_buffer.len())
+        )
+    } else if app.input_mode == InputMode::RemoveKeyPassword {
+        format!(
+            "Current key password: {}",
+            "*".repeat(app.input_buffer.len())
+        )
+    } else if app.input_mode == InputMode::ImportKeyPassword {
+        format!("Import password: {}", "*".repeat(app.input_buffer.len()))
+    } else if app.input_mode == InputMode::ImportKeyPasswordConfirm {
+        format!(
+            "Confirm import password: {}",
+            "*".repeat(app.input_buffer.len())
+        )
     } else if app.input_mode == InputMode::ChangePasswordOld {
         format!("Current password: {}", "*".repeat(app.input_buffer.len()))
     } else if app.input_mode == InputMode::ChangePasswordNew {
@@ -1284,6 +1651,7 @@ fn load_keys(
                     loaded: k.loaded,
                     has_disk: k.has_disk,
                     has_cert: k.has_cert,
+                    password_protected: k.password_protected,
                     constraints: k.constraints,
                     created: k.created,
                     updated: k.updated,
@@ -2407,7 +2775,9 @@ fn handle_load_result(
             if (error_msg.contains("password")
                 || error_msg.contains("passphrase")
                 || error_msg.contains("encrypted")
-                || error_msg.contains("decrypt"))
+                || error_msg.contains("decrypt")
+                || error_msg.contains("wrong password")
+                || error_msg.contains("invalid password"))
                 && app.key_being_loaded.is_none()
             {
                 // Prompt for key password
@@ -2415,7 +2785,9 @@ fn handle_load_result(
                     app.input_mode = InputMode::KeyPassword;
                     app.input_buffer.clear();
                     app.key_being_loaded = Some(fingerprint.clone());
-                    app.set_status("Key is password-protected. Enter password:".to_string());
+                    app.set_status(
+                        "Wrong password or key is password-protected. Enter password:".to_string(),
+                    );
                 } else {
                     app.set_status(format!("Failed to load key: {}", e));
                 }
@@ -2424,4 +2796,313 @@ fn handle_load_result(
             }
         }
     }
+}
+
+fn set_key_password(
+    socket_path: Option<&String>,
+    fingerprint: &str,
+    password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = socket_path
+        .cloned()
+        .or_else(|| std::env::var("SSH_AUTH_SOCK").ok())
+        .ok_or("No socket path available")?;
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(&socket)?;
+
+    // Build CBOR request for manage.set_password
+    use rssh_proto::cbor::ExtensionRequest;
+    let request_data = {
+        #[derive(serde::Serialize)]
+        struct SetPasswordRequest {
+            fp_sha256_hex: String,
+            set_password_protection: bool,
+            new_key_pass_b64: String,
+        }
+
+        let req = SetPasswordRequest {
+            fp_sha256_hex: fingerprint.to_string(),
+            set_password_protection: true,
+            new_key_pass_b64: {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(password.as_bytes())
+            },
+        };
+
+        let mut data = Vec::new();
+        ciborium::into_writer(&req, &mut data)?;
+        data
+    };
+
+    let request = ExtensionRequest {
+        extension: "manage.set_password".to_string(),
+        data: request_data,
+    };
+
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&request, &mut cbor_data)?;
+
+    // Build SSH protocol message with extension namespace
+    let mut message = Vec::new();
+    message.push(rssh_proto::messages::SSH_AGENTC_EXTENSION);
+
+    // Add extension namespace
+    let ext_namespace = b"rssh-agent@local";
+    message.extend_from_slice(&(ext_namespace.len() as u32).to_be_bytes());
+    message.extend_from_slice(ext_namespace);
+
+    // Add CBOR data
+    message.extend_from_slice(&cbor_data);
+
+    // Add length prefix for the whole message
+    let mut full_message = Vec::new();
+    full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    full_message.extend_from_slice(&message);
+
+    stream.write_all(&full_message)?;
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut response = vec![0u8; len];
+    stream.read_exact(&mut response)?;
+
+    // Check response type
+    if response[0] == rssh_proto::messages::SSH_AGENT_SUCCESS {
+        // Parse the CBOR response to check if it's actually successful
+        let mut offset = 1;
+        if response.len() < offset + 4 {
+            return Err("Response too short".into());
+        }
+
+        let data_len = u32::from_be_bytes([
+            response[offset],
+            response[offset + 1],
+            response[offset + 2],
+            response[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if response.len() < offset + data_len {
+            return Err("Response data truncated".into());
+        }
+
+        let cbor_data = &response[offset..offset + data_len];
+        let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
+
+        if !cbor_response.success {
+            return Err(format!(
+                "Set password failed: {}",
+                String::from_utf8_lossy(&cbor_response.data)
+            )
+            .into());
+        }
+
+        Ok(())
+    } else {
+        Err("Failed to set key password".into())
+    }
+}
+
+fn remove_key_password(
+    socket_path: Option<&String>,
+    fingerprint: &str,
+    current_password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = socket_path
+        .cloned()
+        .or_else(|| std::env::var("SSH_AUTH_SOCK").ok())
+        .ok_or("No socket path available")?;
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(&socket)?;
+
+    // Build CBOR request for manage.set_password with set_password_protection=false
+    use rssh_proto::cbor::ExtensionRequest;
+    let request_data = {
+        #[derive(serde::Serialize)]
+        struct RemovePasswordRequest {
+            fp_sha256_hex: String,
+            set_password_protection: bool,
+            new_key_pass_b64: Option<String>,
+            current_key_pass_b64: Option<String>,
+        }
+
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+        let current_pass_b64 = BASE64.encode(current_password.as_bytes());
+
+        let req = RemovePasswordRequest {
+            fp_sha256_hex: fingerprint.to_string(),
+            set_password_protection: false,
+            new_key_pass_b64: None,
+            current_key_pass_b64: Some(current_pass_b64),
+        };
+
+        let mut data = Vec::new();
+        ciborium::into_writer(&req, &mut data)?;
+        data
+    };
+
+    let request = ExtensionRequest {
+        extension: "manage.set_password".to_string(),
+        data: request_data,
+    };
+
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&request, &mut cbor_data)?;
+
+    // Build SSH protocol message with extension namespace
+    let mut message = Vec::new();
+    message.push(rssh_proto::messages::SSH_AGENTC_EXTENSION);
+
+    // Add extension namespace
+    let ext_namespace = b"rssh-agent@local";
+    message.extend_from_slice(&(ext_namespace.len() as u32).to_be_bytes());
+    message.extend_from_slice(ext_namespace);
+
+    // Add CBOR data
+    message.extend_from_slice(&cbor_data);
+
+    // Add length prefix for the whole message
+    let mut full_message = Vec::new();
+    full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    full_message.extend_from_slice(&message);
+
+    stream.write_all(&full_message)?;
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut response = vec![0u8; len];
+    stream.read_exact(&mut response)?;
+
+    // Check response type
+    if response[0] == rssh_proto::messages::SSH_AGENT_SUCCESS {
+        // Parse the CBOR response to check if it's actually successful
+        let mut offset = 1;
+        if response.len() < offset + 4 {
+            return Err("Response too short".into());
+        }
+
+        let data_len = u32::from_be_bytes([
+            response[offset],
+            response[offset + 1],
+            response[offset + 2],
+            response[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if response.len() < offset + data_len {
+            return Err("Response data truncated".into());
+        }
+
+        let cbor_data = &response[offset..offset + data_len];
+        let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
+
+        if !cbor_response.success {
+            return Err(format!(
+                "Remove password failed: {}",
+                String::from_utf8_lossy(&cbor_response.data)
+            )
+            .into());
+        }
+
+        Ok(())
+    } else {
+        Err("Failed to remove key password".into())
+    }
+}
+
+fn import_key_with_password(
+    socket_path: Option<&String>,
+    fingerprint: &str,
+    password: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = socket_path
+        .cloned()
+        .or_else(|| std::env::var("SSH_AUTH_SOCK").ok())
+        .ok_or("No socket path available")?;
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(&socket)?;
+
+    // Build CBOR request for manage.import with password protection
+    use rssh_proto::cbor::ExtensionRequest;
+    let import_data = {
+        #[derive(serde::Serialize)]
+        struct ImportWithPasswordRequest {
+            fp_sha256_hex: String,
+            set_key_password: bool,
+            new_key_pass_b64: String,
+        }
+
+        let req = ImportWithPasswordRequest {
+            fp_sha256_hex: fingerprint.to_string(),
+            set_key_password: true,
+            new_key_pass_b64: {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(password.as_bytes())
+            },
+        };
+
+        let mut data = Vec::new();
+        ciborium::into_writer(&req, &mut data)?;
+        data
+    };
+
+    let request = ExtensionRequest {
+        extension: "manage.import".to_string(),
+        data: import_data,
+    };
+
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&request, &mut cbor_data)?;
+
+    // Build extension message
+    let mut message = Vec::new();
+    let ext_name = "rssh-agent@local";
+
+    // Message length (type + name_len + name + cbor)
+    let total_len = 1 + 4 + ext_name.len() + cbor_data.len();
+    message.extend_from_slice(&(total_len as u32).to_be_bytes());
+
+    // Message type: SSH_AGENTC_EXTENSION (27)
+    message.push(27);
+
+    // Extension name
+    message.extend_from_slice(&(ext_name.len() as u32).to_be_bytes());
+    message.extend_from_slice(ext_name.as_bytes());
+
+    // CBOR data
+    message.extend_from_slice(&cbor_data);
+
+    // Send request
+    stream.write_all(&message)?;
+
+    // Read response length
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let response_len = u32::from_be_bytes(len_buf) as usize;
+
+    // Read response
+    let mut response = vec![0u8; response_len];
+    stream.read_exact(&mut response)?;
+
+    // Check response type
+    if response[0] != rssh_proto::messages::SSH_AGENT_SUCCESS {
+        return Err("Import with password failed".into());
+    }
+
+    Ok(())
 }

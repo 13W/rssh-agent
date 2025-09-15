@@ -86,6 +86,19 @@ enum Commands {
         #[arg(long)]
         socket: Option<String>,
     },
+    /// Import SSH key from disk
+    Import {
+        /// Path to the SSH private key file
+        path: String,
+
+        /// Description for the imported key
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Protect the imported key with a password
+        #[arg(long)]
+        protect: bool,
+    },
     /// Manage keys via TUI
     #[cfg(feature = "tui")]
     Manage,
@@ -162,6 +175,11 @@ fn main() -> ExitCode {
         Some(Commands::Lock) => commands::LockCommand::execute(cli.socket),
         Some(Commands::Unlock { pass_fd }) => commands::UnlockCommand::execute(cli.socket, pass_fd),
         Some(Commands::Stop { socket }) => commands::StopCommand::execute(socket.or(cli.socket)),
+        Some(Commands::Import {
+            path,
+            description,
+            protect,
+        }) => commands::ImportCommand::execute(path, description, protect, cli.socket),
         #[cfg(feature = "tui")]
         Some(Commands::Manage) => commands::ManageCommand::execute(cli.socket),
         Some(Commands::Completion { shell }) => {
@@ -188,10 +206,7 @@ fn main() -> ExitCode {
             let man = Man::new(cmd);
             let mut buffer = Vec::new();
             if let Err(e) = man.render(&mut buffer) {
-                Err(rssh_core::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    e,
-                )))
+                Err(rssh_core::Error::Io(std::io::Error::other(e)))
             } else if let Err(e) = std::io::stdout().write_all(&buffer) {
                 Err(rssh_core::Error::Io(e))
             } else {

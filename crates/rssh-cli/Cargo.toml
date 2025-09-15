@@ -23,8 +23,12 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 ciborium = { workspace = true }
+ssh-key = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

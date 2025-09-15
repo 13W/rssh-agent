@@ -78,6 +78,7 @@ async fn test_manage_list_response_parsing() {
             loaded: true,
             has_disk: true,
             has_cert: false,
+            password_protected: false,
             constraints: serde_json::json!({
                 "confirm": true,
                 "lifetime_expires_at": null,
@@ -94,6 +95,7 @@ async fn test_manage_list_response_parsing() {
             loaded: true,
             has_disk: false,
             has_cert: false,
+            password_protected: false,
             constraints: serde_json::json!({
                 "confirm": false,
                 "lifetime_expires_at": null,

@@ -111,7 +111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting rssh-agent daemon...");
     let daemon_socket = "/tmp/rssh-daemon-real.sock";
     let mut daemon = Command::new("cargo")
-        .args(&[
+        .args([
             "run",
             "--bin",
             "rssh-agent",
@@ -174,17 +174,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     proxy_handle.abort();
 
     // Get exchanges if any were recorded
-    let exchanges = match proxy_handle.await {
-        Ok(ex) => ex,
-        Err(_) => Vec::new(),
-    };
+    let exchanges: Vec<MockExchange> = (proxy_handle.await).unwrap_or_default();
 
     // Save the mocks
     if !exchanges.is_empty() {
         let mock_dir = "tests/mocks";
         fs::create_dir_all(mock_dir)?;
 
-        let command_name = args[1..].join("_").replace('/', "_").replace('-', "_");
+        let command_name = args[1..].join("_").replace(['/', '-'], "_");
 
         for (i, exchange) in exchanges.iter().enumerate() {
             let base_name = format!("{:02}_{}_{}", i, command_name, exchange.description);

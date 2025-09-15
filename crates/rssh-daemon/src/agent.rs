@@ -891,6 +891,75 @@ impl Agent {
                     }
                 }
             }
+            "manage.import_direct" => {
+                tracing::debug!("Handling manage.import_direct extension");
+
+                // Get master password
+                let master_password = {
+                    let master_password_guard = self.master_password.read().await;
+                    master_password_guard.clone()
+                };
+
+                let master_password = match master_password {
+                    Some(pwd) => pwd,
+                    None => {
+                        tracing::error!("Master password not available for manage.import_direct");
+                        return Ok(messages::build_failure());
+                    }
+                };
+
+                match extensions::handle_manage_import_direct(&request.data, &master_password).await
+                {
+                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                    Err(e) => {
+                        tracing::error!("Failed to handle manage.import_direct: {}", e);
+                        // Check if we should return a specific error response
+                        match extensions::build_error_response(e) {
+                            Ok(error_response) => {
+                                Ok(extensions::build_extension_response(error_response))
+                            }
+                            Err(_) => Ok(messages::build_failure()),
+                        }
+                    }
+                }
+            }
+            "manage.set_password" => {
+                tracing::debug!("Handling manage.set_password extension");
+
+                // Get master password
+                let master_password = {
+                    let master_password_guard = self.master_password.read().await;
+                    master_password_guard.clone()
+                };
+
+                let master_password = match master_password {
+                    Some(pwd) => pwd,
+                    None => {
+                        tracing::error!("Master password not available for manage.set_password");
+                        return Ok(messages::build_failure());
+                    }
+                };
+
+                match extensions::handle_manage_set_password(
+                    &request.data,
+                    &self.ram_store,
+                    &master_password,
+                )
+                .await
+                {
+                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                    Err(e) => {
+                        tracing::error!("Failed to handle manage.set_password: {}", e);
+                        // Check if we should return a specific error response
+                        match extensions::build_error_response(e) {
+                            Ok(error_response) => {
+                                Ok(extensions::build_extension_response(error_response))
+                            }
+                            Err(_) => Ok(messages::build_failure()),
+                        }
+                    }
+                }
+            }
             _ => {
                 // Handle unknown extensions gracefully
                 tracing::info!("Received unknown extension: {}", request.extension);
