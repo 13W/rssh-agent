@@ -78,7 +78,8 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     } else {
         // No explicit socket path, check SSH_AUTH_SOCK
         if let Ok(existing_sock) = std::env::var("SSH_AUTH_SOCK")
-            && check_socket_alive(&existing_sock).await {
+            && check_socket_alive(&existing_sock).await
+        {
             return Err(Error::AlreadyRunning);
         }
         SocketServer::create_temp_socket(agent.clone())?

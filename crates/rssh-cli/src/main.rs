@@ -92,7 +92,7 @@ enum Commands {
     /// Generate shell completions
     Completion {
         /// Shell to generate completions for
-        shell: CompletionShell
+        shell: CompletionShell,
     },
     /// Display manual page
     Man,
@@ -188,7 +188,10 @@ fn main() -> ExitCode {
             let man = Man::new(cmd);
             let mut buffer = Vec::new();
             if let Err(e) = man.render(&mut buffer) {
-                Err(rssh_core::Error::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                Err(rssh_core::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    e,
+                )))
             } else if let Err(e) = std::io::stdout().write_all(&buffer) {
                 Err(rssh_core::Error::Io(e))
             } else {

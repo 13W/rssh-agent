@@ -113,7 +113,9 @@ impl SshPrivateKey {
                 let public_key_bytes = self.public_key_bytes();
                 // Skip the algorithm identifier and length prefix to get raw 32 bytes
                 if public_key_bytes.len() < 32 {
-                    return Err(Error::Internal("Invalid Ed25519 public key length".to_string()));
+                    return Err(Error::Internal(
+                        "Invalid Ed25519 public key length".to_string(),
+                    ));
                 }
                 let raw_public = &public_key_bytes[public_key_bytes.len() - 32..];
                 write_string(&mut wire_data, raw_public);
@@ -121,7 +123,11 @@ impl SshPrivateKey {
                 // Get the private key components
                 let ed25519_keypair = match self.inner.key_data().ed25519() {
                     Some(keypair) => keypair,
-                    None => return Err(Error::Internal("Failed to get Ed25519 key data".to_string())),
+                    None => {
+                        return Err(Error::Internal(
+                            "Failed to get Ed25519 key data".to_string(),
+                        ));
+                    }
                 };
 
                 let private_bytes = ed25519_keypair.private.to_bytes();
@@ -159,7 +165,10 @@ impl SshPrivateKey {
                 write_string(&mut wire_data, rsa_keypair.private.q.as_bytes());
             }
             _ => {
-                return Err(Error::Internal(format!("Unsupported algorithm: {:?}", self.inner.algorithm())));
+                return Err(Error::Internal(format!(
+                    "Unsupported algorithm: {:?}",
+                    self.inner.algorithm()
+                )));
             }
         }
 

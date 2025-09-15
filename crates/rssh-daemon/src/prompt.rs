@@ -45,10 +45,10 @@ impl Prompter for TtyPrompter {
         loop {
             print!("{} (y/n): ", prompt_text);
             std::io::stdout().flush()?;
-            
+
             let mut input = String::new();
             std::io::stdin().read_line(&mut input)?;
-            
+
             match input.trim().to_lowercase().as_str() {
                 "y" | "yes" => return Ok(true),
                 "n" | "no" => return Ok(false),
@@ -113,7 +113,7 @@ impl Prompter for AskpassPrompter {
     fn confirm(&self, prompt_text: &str) -> Result<bool> {
         // For ASKPASS programs, we'll prompt with instructions and expect y/n response
         let confirmation_prompt = format!("{} (Enter 'y' for yes, 'n' for no)", prompt_text);
-        
+
         let mut child = Command::new(&self.program)
             .arg(&confirmation_prompt)
             .stdin(Stdio::null())
@@ -173,24 +173,25 @@ impl PrompterDecision {
 
         // Check if we have SSH_ASKPASS
         if let Ok(askpass_prog) = env::var("SSH_ASKPASS")
-            && !askpass_prog.is_empty() {
-                // Check conditions for using ASKPASS
-                let has_tty = atty::is(atty::Stream::Stdin);
-                let has_display = env::var("DISPLAY").is_ok();
+            && !askpass_prog.is_empty()
+        {
+            // Check conditions for using ASKPASS
+            let has_tty = atty::is(atty::Stream::Stdin);
+            let has_display = env::var("DISPLAY").is_ok();
 
-                if askpass_require == "force" {
-                    return Some(Box::new(AskpassPrompter::new(askpass_prog)));
-                }
-
-                if askpass_require == "prefer" {
-                    return Some(Box::new(AskpassPrompter::new(askpass_prog)));
-                }
-
-                // Default behavior: use ASKPASS if no TTY and DISPLAY is set
-                if !has_tty && has_display {
-                    return Some(Box::new(AskpassPrompter::new(askpass_prog)));
-                }
+            if askpass_require == "force" {
+                return Some(Box::new(AskpassPrompter::new(askpass_prog)));
             }
+
+            if askpass_require == "prefer" {
+                return Some(Box::new(AskpassPrompter::new(askpass_prog)));
+            }
+
+            // Default behavior: use ASKPASS if no TTY and DISPLAY is set
+            if !has_tty && has_display {
+                return Some(Box::new(AskpassPrompter::new(askpass_prog)));
+            }
+        }
 
         // Fall back to TTY if available
         if atty::is(atty::Stream::Stdin) {

@@ -1,8 +1,8 @@
+use crate::prompt::PrompterDecision;
 use rssh_core::{Result, config::Config, ram_store::RamStore};
 use rssh_proto::{messages, wire};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::prompt::PrompterDecision;
 
 use zeroize::Zeroize;
 #[allow(dead_code)]
@@ -66,17 +66,16 @@ impl Agent {
     pub async fn set_master_password(&self, master_password: String) -> Result<()> {
         // Unlock the RAM store with the master password
         self.ram_store.unlock(&master_password, &self.config)?;
-        
+
         // Store the master password in the agent
         {
             let mut master_password_guard = self.master_password.write().await;
             *master_password_guard = Some(master_password);
         }
-        
+
         tracing::info!("Master password set and RAM store unlocked");
         Ok(())
     }
-
 
     /// Handle an incoming message
     pub async fn handle_message(&self, message: &[u8]) -> Result<Vec<u8>> {
@@ -87,8 +86,7 @@ impl Agent {
         let msg_type = wire::MessageType::from_u8(message[0]);
 
         // Check if locked (only UNLOCK allowed when locked)
-        if *self.locked.read().await
-            && msg_type != Some(wire::MessageType::Unlock) {
+        if *self.locked.read().await && msg_type != Some(wire::MessageType::Unlock) {
             return Ok(messages::build_failure());
         }
 
@@ -216,26 +214,33 @@ impl Agent {
         let fingerprint = hex::encode(hasher.finalize());
 
         // Create confirmation function for keys that require it
-        let confirm_fn = Box::new(|fingerprint: &str, description: &str, key_type: &str| -> Result<bool> {
-            let prompter = PrompterDecision::choose()
-                .ok_or_else(|| rssh_core::Error::Internal("No prompt method available".into()))?;
+        let confirm_fn = Box::new(
+            |fingerprint: &str, description: &str, key_type: &str| -> Result<bool> {
+                let prompter = PrompterDecision::choose().ok_or_else(|| {
+                    rssh_core::Error::Internal("No prompt method available".into())
+                })?;
 
-            let prompt_text = format!(
-                "Allow use of {} key '{}' ({})?",
-                key_type,
-                description,
-                &fingerprint[..12]
-            );
+                let prompt_text = format!(
+                    "Allow use of {} key '{}' ({})?",
+                    key_type,
+                    description,
+                    &fingerprint[..12]
+                );
 
-            prompter.confirm(&prompt_text)
-        });
+                prompter.confirm(&prompt_text)
+            },
+        );
 
         // Find and sign with the key (with confirmation if needed)
-        match self.ram_store.with_key_confirmed(&fingerprint, |key_data| {
-            use crate::signing;
-            signing::sign_data(key_data, &request.data, request.flags)
-                .map_err(rssh_core::Error::Internal)
-        }, Some(confirm_fn)) {
+        match self.ram_store.with_key_confirmed(
+            &fingerprint,
+            |key_data| {
+                use crate::signing;
+                signing::sign_data(key_data, &request.data, request.flags)
+                    .map_err(rssh_core::Error::Internal)
+            },
+            Some(confirm_fn),
+        ) {
             Ok(signature) => {
                 tracing::info!("Signed data with key {}", fingerprint);
                 Ok(messages::build_sign_response(&signature))
@@ -487,7 +492,10 @@ impl Agent {
                 if remaining_secs == u64::MAX {
                     tracing::error!("Unlock failed - permanently locked out");
                 } else {
-                    tracing::warn!("Unlock failed - rate limited for {} seconds", remaining_secs);
+                    tracing::warn!(
+                        "Unlock failed - rate limited for {} seconds",
+                        remaining_secs
+                    );
                 }
                 Ok(messages::build_failure())
             }
@@ -501,7 +509,11 @@ impl Agent {
     async fn handle_extension(&self, message: &[u8]) -> Result<Vec<u8>> {
         use crate::extensions;
 
-        tracing::debug!("Extension message received, length: {}, data: {:02x?}", message.len(), &message[..message.len().min(20)]);
+        tracing::debug!(
+            "Extension message received, length: {}, data: {:02x?}",
+            message.len(),
+            &message[..message.len().min(20)]
+        );
 
         // Parse the extension request
         let request = match extensions::parse_extension_request(message) {
@@ -514,6 +526,17 @@ impl Agent {
 
         // Handle different extension operations
         match request.extension.as_str() {
+            "session-bind@openssh.com" => {
+                tracing::debug!("Handling session-bind@openssh.com extension");
+
+                match extensions::handle_session_bind(&request.data) {
+                    Ok(response) => Ok(response),
+                    Err(e) => {
+                        tracing::error!("Failed to handle session-bind: {}", e);
+                        Ok(messages::build_failure())
+                    }
+                }
+            }
             "manage.list" => {
                 // Get list of keys
                 let keys = match self.ram_store.list_keys() {
@@ -848,8 +871,20 @@ impl Agent {
                 }
             }
             _ => {
-                tracing::warn!("Unknown extension operation: {}", request.extension);
-                return Ok(messages::build_failure());
+                // Handle unknown extensions gracefully
+                tracing::info!("Received unknown extension: {}", request.extension);
+
+                // For unknown OpenSSH extensions, return success to maintain compatibility
+                // This prevents warnings in OpenSSH clients for extensions we don't implement
+                if request.extension.contains("@openssh.com") {
+                    tracing::debug!(
+                        "Unknown OpenSSH extension, returning success for compatibility"
+                    );
+                    Ok(vec![rssh_proto::wire::MessageType::Success as u8])
+                } else {
+                    tracing::warn!("Unknown extension operation: {}", request.extension);
+                    Ok(messages::build_failure())
+                }
             }
         }
     }
@@ -870,7 +905,10 @@ mod tests {
         let agent = Agent::new(config);
 
         // Set the master password so unlock operations can work
-        agent.set_master_password("test_password_12345".to_string()).await.unwrap();
+        agent
+            .set_master_password("test_password_12345".to_string())
+            .await
+            .unwrap();
 
         // Lock the RAM store initially so the test can test the lock/unlock cycle
         agent.ram_store.lock().unwrap();
@@ -932,7 +970,10 @@ mod tests {
         let agent = Agent::new(config);
 
         // Set the master password so unlock operations can work
-        agent.set_master_password("test_password_12345".to_string()).await.unwrap();
+        agent
+            .set_master_password("test_password_12345".to_string())
+            .await
+            .unwrap();
 
         // Set agent to unlocked state
         {

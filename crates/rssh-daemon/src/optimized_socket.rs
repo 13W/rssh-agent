@@ -8,10 +8,10 @@
 use crate::agent::Agent;
 use rssh_core::{Error, Result};
 // use std::collections::HashMap; // Unused import
+use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{UnixListener, UnixStream};
 // use tokio::sync::RwLock; // Unused import
@@ -35,7 +35,7 @@ pub async fn handle_client_optimized(
 ) -> Result<()> {
     stats.total_connections.fetch_add(1, Ordering::Relaxed);
     stats.active_connections.fetch_add(1, Ordering::Relaxed);
-    
+
     // Use buffered I/O for better performance
     let (read_half, write_half) = stream.into_split();
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, read_half);
@@ -106,7 +106,9 @@ pub async fn handle_client_optimized(
     // Update average response time before connection closes
     if !response_times.is_empty() {
         let avg_time = response_times.iter().sum::<u64>() / response_times.len() as u64;
-        stats.average_response_time_ms.store(avg_time, Ordering::Relaxed);
+        stats
+            .average_response_time_ms
+            .store(avg_time, Ordering::Relaxed);
     }
 
     stats.active_connections.fetch_sub(1, Ordering::Relaxed);
@@ -142,11 +144,14 @@ impl OptimizedSocketServer {
 
         // Create Unix socket listener
         let listener = UnixListener::bind(&self.socket_path)?;
-        
+
         // Set socket permissions
         std::fs::set_permissions(&self.socket_path, std::fs::Permissions::from_mode(0o600))?;
-        
-        tracing::info!("Optimized agent socket listening at: {}", self.socket_path.display());
+
+        tracing::info!(
+            "Optimized agent socket listening at: {}",
+            self.socket_path.display()
+        );
 
         // Start stats logging task
         let stats_clone = self.stats.clone();
@@ -154,7 +159,7 @@ impl OptimizedSocketServer {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
                 interval.tick().await;
-                
+
                 // Log stats periodically
                 tracing::debug!(
                     "Connection stats: active={}, total={}, requests={}, avg_response_ms={}",
@@ -172,7 +177,7 @@ impl OptimizedSocketServer {
                 Ok((stream, _)) => {
                     let agent = self.agent.clone();
                     let stats = self.stats.clone();
-                    
+
                     tokio::spawn(async move {
                         if let Err(e) = handle_client_optimized(stream, agent, stats).await {
                             tracing::error!("Optimized client handler error: {}", e);
@@ -206,7 +211,7 @@ mod tests {
             total_requests: AtomicU64::new(0),
             average_response_time_ms: AtomicU64::new(0),
         };
-        
+
         stats.total_connections.fetch_add(1, Ordering::Relaxed);
         assert_eq!(stats.total_connections.load(Ordering::Relaxed), 1);
     }

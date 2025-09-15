@@ -1,15 +1,15 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use rssh_core::ram_store::RamStore;
-use rssh_core::config::Config;
-use rssh_daemon::signing;
-use ed25519_dalek::{Signer, SigningKey};
-use rsa::{RsaPrivateKey, RsaPublicKey};
-use rsa::traits::{PublicKeyParts, PrivateKeyParts};
-use tempfile::TempDir;
-use sha2::{Sha256, Digest};
-use rssh_proto::wire;
-use rand::rngs::OsRng as RandOsRng;
 use base64::{Engine as _, engine::general_purpose};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use ed25519_dalek::{Signer, SigningKey};
+use rand::rngs::OsRng as RandOsRng;
+use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+use rsa::{RsaPrivateKey, RsaPublicKey};
+use rssh_core::config::Config;
+use rssh_core::ram_store::RamStore;
+use rssh_daemon::signing;
+use rssh_proto::wire;
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
 fn quick_crypto_benchmarks(c: &mut Criterion) {
     // Ed25519 signing benchmark
@@ -79,10 +79,18 @@ fn quick_ram_store_benchmarks(c: &mut Criterion) {
     c.bench_function("ram_store_encrypt_decrypt", |b| {
         b.iter(|| {
             let fp = format!("fp{}", rand::random::<u32>());
-            store.load_key(&fp, test_key_data, "test".to_string(), "ed25519".to_string(), false).unwrap();
-            let result = store.with_key(&fp, |data| {
-                Ok(black_box(data.len()))
-            }).unwrap();
+            store
+                .load_key(
+                    &fp,
+                    test_key_data,
+                    "test".to_string(),
+                    "ed25519".to_string(),
+                    false,
+                )
+                .unwrap();
+            let result = store
+                .with_key(&fp, |data| Ok(black_box(data.len())))
+                .unwrap();
             store.unload_key(&fp).unwrap();
             black_box(result)
         })
@@ -91,7 +99,15 @@ fn quick_ram_store_benchmarks(c: &mut Criterion) {
     // Load some keys for list performance test
     for i in 0..10 {
         let fp = format!("bench_key_{:04}", i);
-        store.load_key(&fp, test_key_data, "test".to_string(), "ed25519".to_string(), false).unwrap();
+        store
+            .load_key(
+                &fp,
+                test_key_data,
+                "test".to_string(),
+                "ed25519".to_string(),
+                false,
+            )
+            .unwrap();
     }
 
     c.bench_function("ram_store_list_keys_10", |b| {
@@ -130,7 +146,9 @@ fn quick_argon2_benchmark(c: &mut Criterion) {
             let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
             let salt = b"test_salt_12345678901234567890";
             let mut key = vec![0u8; 32];
-            argon2.hash_password_into(b"test_password_123", salt, &mut key).unwrap();
+            argon2
+                .hash_password_into(b"test_password_123", salt, &mut key)
+                .unwrap();
             black_box(key)
         })
     });

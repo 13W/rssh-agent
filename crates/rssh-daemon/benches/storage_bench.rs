@@ -1,10 +1,10 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BatchSize};
+use base64::{Engine as _, engine::general_purpose};
+use chrono::Utc;
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use rssh_core::keyfile::{KeyFile, KeyPayload, KeyType};
 use rssh_daemon::extensions;
-use chrono::Utc;
-use tempfile::TempDir;
 use std::fs;
-use base64::{Engine as _, engine::general_purpose};
+use tempfile::TempDir;
 
 fn benchmark_keyfile_operations(c: &mut Criterion) {
     c.bench_function("keyfile_write_ed25519", |b| {
@@ -23,10 +23,11 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                 (temp_dir, fingerprint, payload)
             },
             |(temp_dir, fingerprint, payload)| {
-                KeyFile::write(temp_dir.path(), &fingerprint, &payload, "test_password_123").unwrap();
+                KeyFile::write(temp_dir.path(), &fingerprint, &payload, "test_password_123")
+                    .unwrap();
                 black_box(())
             },
-            BatchSize::SmallInput
+            BatchSize::SmallInput,
         )
     });
 
@@ -43,14 +44,16 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                     created: Utc::now(),
                     updated: Utc::now(),
                 };
-                KeyFile::write(temp_dir.path(), &fingerprint, &payload, "test_password_123").unwrap();
+                KeyFile::write(temp_dir.path(), &fingerprint, &payload, "test_password_123")
+                    .unwrap();
                 (temp_dir, fingerprint)
             },
             |(temp_dir, fingerprint)| {
-                let payload = KeyFile::read(temp_dir.path(), &fingerprint, "test_password_123").unwrap();
+                let payload =
+                    KeyFile::read(temp_dir.path(), &fingerprint, "test_password_123").unwrap();
                 black_box(payload)
             },
-            BatchSize::SmallInput
+            BatchSize::SmallInput,
         )
     });
 
@@ -70,10 +73,11 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                 (temp_dir, fingerprint, payload)
             },
             |(temp_dir, fingerprint, payload)| {
-                KeyFile::write(temp_dir.path(), &fingerprint, &payload, "test_password_123").unwrap();
+                KeyFile::write(temp_dir.path(), &fingerprint, &payload, "test_password_123")
+                    .unwrap();
                 black_box(())
             },
-            BatchSize::SmallInput
+            BatchSize::SmallInput,
         )
     });
 }
@@ -83,14 +87,15 @@ fn benchmark_extension_operations(c: &mut Criterion) {
 
     c.bench_function("extension_manage_list_empty", |b| {
         let temp_dir = TempDir::new().unwrap();
-        
+
         b.iter(|| {
             rt.block_on(async {
                 let result = extensions::handle_manage_list(
                     Vec::new(),
                     Some(temp_dir.path().to_str().unwrap()),
-                    Some("test_password_123")
-                ).unwrap();
+                    Some("test_password_123"),
+                )
+                .unwrap();
                 black_box(result)
             })
         })
@@ -98,7 +103,7 @@ fn benchmark_extension_operations(c: &mut Criterion) {
 
     c.bench_function("extension_manage_list_100_keys", |b| {
         let temp_dir = TempDir::new().unwrap();
-        
+
         // Create 100 keyfiles on disk
         for i in 0..100 {
             let fingerprint = format!("{:064x}", i);
@@ -112,14 +117,15 @@ fn benchmark_extension_operations(c: &mut Criterion) {
             };
             KeyFile::write(temp_dir.path(), &fingerprint, &payload, "test_password_123").unwrap();
         }
-        
+
         b.iter(|| {
             rt.block_on(async {
                 let result = extensions::handle_manage_list(
                     Vec::new(),
                     Some(temp_dir.path().to_str().unwrap()),
-                    Some("test_password_123")
-                ).unwrap();
+                    Some("test_password_123"),
+                )
+                .unwrap();
                 black_box(result)
             })
         })
@@ -139,7 +145,7 @@ fn benchmark_file_io_operations(c: &mut Criterion) {
                 fs::write(&file_path, &data).unwrap();
                 black_box(())
             },
-            BatchSize::SmallInput
+            BatchSize::SmallInput,
         )
     });
 
@@ -156,7 +162,7 @@ fn benchmark_file_io_operations(c: &mut Criterion) {
                 let data = fs::read(&file_path).unwrap();
                 black_box(data)
             },
-            BatchSize::SmallInput
+            BatchSize::SmallInput,
         )
     });
 
@@ -169,7 +175,7 @@ fn benchmark_file_io_operations(c: &mut Criterion) {
             created: Utc::now(),
             updated: Utc::now(),
         };
-        
+
         b.iter(|| {
             let json = serde_json::to_string_pretty(&payload).unwrap();
             black_box(json)
@@ -186,7 +192,7 @@ fn benchmark_file_io_operations(c: &mut Criterion) {
             updated: Utc::now(),
         };
         let json = serde_json::to_string_pretty(&payload).unwrap();
-        
+
         b.iter(|| {
             let parsed: KeyPayload = serde_json::from_str(&json).unwrap();
             black_box(parsed)

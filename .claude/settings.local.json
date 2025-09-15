@@ -12,15 +12,15 @@
 			"mcp__cargo-mcp__cargo_clippy",
 			"Bash(git:*)",
 			"Bash(cargo:*)",
-			"Bash(./target/debug/rssh-agent --help)",
+			"Bash(./target/debug/rssh-agent:*)",
+			"Bash(./target/release/rssh-agent:*)",
 			"Bash(./target/**/rssh-agent:*)",
 			"Bash(./target/:*)",
-			"Bash(./target/debug/rssh-agent unlock:*)",
-			"Bash(./target/debug/rssh-agent stop:*)",
 			"Bash(./:*)",
 			"Bash(head:*)",
 			"Bash(chmod:*)",
-			"Bash(rustc:*)"
+			"Bash(rustc:*)",
+			"WebSearch"
 		],
 		"deny": ["Bash(sudo:*)"]
 	},

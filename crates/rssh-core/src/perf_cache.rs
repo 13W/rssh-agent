@@ -1,12 +1,12 @@
 //! Performance optimizations through intelligent caching
-//! 
+//!
 //! This module provides caching mechanisms to reduce crypto operation overhead
 //! and improve overall daemon performance.
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::RwLock;
 // use sha2::Digest; // Unused import removed
 use zeroize::Zeroize;
 
@@ -47,7 +47,8 @@ impl KeyDerivationCache {
         {
             let entries = self.entries.read();
             if let Some(cached) = entries.get(cache_key)
-                && cached.created_at.elapsed() < self.ttl {
+                && cached.created_at.elapsed() < self.ttl
+            {
                 // Update access count in background to avoid write lock contention
                 return Ok(cached.key);
             }
@@ -61,17 +62,20 @@ impl KeyDerivationCache {
 
     fn insert(&self, key: String, derived_key: [u8; 32]) {
         let mut entries = self.entries.write();
-        
+
         // Evict old entries if at capacity
         if entries.len() >= self.max_entries {
             self.evict_lru(&mut entries);
         }
 
-        entries.insert(key, CachedKey {
-            key: derived_key,
-            created_at: Instant::now(),
-            access_count: 1,
-        });
+        entries.insert(
+            key,
+            CachedKey {
+                key: derived_key,
+                created_at: Instant::now(),
+                access_count: 1,
+            },
+        );
     }
 
     fn evict_lru(&self, entries: &mut HashMap<String, CachedKey>) {
@@ -83,9 +87,8 @@ impl KeyDerivationCache {
         {
             let oldest_key = oldest_key.clone();
             entries.remove(&oldest_key);
-        } else if let Some((oldest_key, _)) = entries
-            .iter()
-            .min_by_key(|(_, cached)| cached.access_count)
+        } else if let Some((oldest_key, _)) =
+            entries.iter().min_by_key(|(_, cached)| cached.access_count)
         {
             let oldest_key = oldest_key.clone();
             entries.remove(&oldest_key);
@@ -144,7 +147,7 @@ impl ConnectionKeyCache {
     pub fn cache_key(&self, connection_id: &str, fingerprint: &str, key_data: Vec<u8>) {
         let cache_key = format!("{}:{}", connection_id, fingerprint);
         let mut cache = self.decrypted_keys.write();
-        
+
         // Cleanup old entries for this connection if at limit
         let connection_prefix = format!("{}:", connection_id);
         let connection_keys: Vec<_> = cache
@@ -152,7 +155,7 @@ impl ConnectionKeyCache {
             .filter(|k| k.starts_with(&connection_prefix))
             .cloned()
             .collect();
-        
+
         if connection_keys.len() >= self.max_keys_per_connection {
             // Remove oldest entry for this connection
             if let Some(oldest) = connection_keys
@@ -163,17 +166,20 @@ impl ConnectionKeyCache {
             }
         }
 
-        cache.insert(cache_key, DecryptedKeyEntry {
-            key_data,
-            last_used: Instant::now(),
-        });
+        cache.insert(
+            cache_key,
+            DecryptedKeyEntry {
+                key_data,
+                last_used: Instant::now(),
+            },
+        );
     }
 
     /// Get cached key for connection
     pub fn get_key(&self, connection_id: &str, fingerprint: &str) -> Option<Vec<u8>> {
         let cache_key = format!("{}:{}", connection_id, fingerprint);
         let mut cache = self.decrypted_keys.write();
-        
+
         if let Some(entry) = cache.get_mut(&cache_key) {
             entry.last_used = Instant::now();
             Some(entry.key_data.clone())
@@ -186,7 +192,7 @@ impl ConnectionKeyCache {
     pub fn clear_connection(&self, connection_id: &str) {
         let connection_prefix = format!("{}:", connection_id);
         let mut cache = self.decrypted_keys.write();
-        
+
         cache.retain(|k, _| !k.starts_with(&connection_prefix));
     }
 
@@ -205,7 +211,7 @@ mod tests {
     #[test]
     fn test_key_derivation_cache() {
         let cache = KeyDerivationCache::new(10, Duration::from_secs(60));
-        
+
         let mut call_count = 0;
         let derive_fn = || {
             call_count += 1;
@@ -223,7 +229,7 @@ mod tests {
     #[test]
     fn test_connection_key_cache() {
         let cache = ConnectionKeyCache::new(2);
-        
+
         // Cache some keys
         cache.cache_key("conn1", "fp1", vec![1, 2, 3]);
         cache.cache_key("conn1", "fp2", vec![4, 5, 6]);
@@ -234,14 +240,14 @@ mod tests {
 
         // Test eviction when limit reached
         cache.cache_key("conn1", "fp3", vec![7, 8, 9]);
-        
+
         // One of the earlier keys should be evicted
         let remaining_keys = [
             cache.get_key("conn1", "fp1"),
             cache.get_key("conn1", "fp2"),
             cache.get_key("conn1", "fp3"),
         ];
-        
+
         let non_none_count = remaining_keys.iter().filter(|k| k.is_some()).count();
         assert_eq!(non_none_count, 2); // Only 2 should remain due to limit
     }
@@ -249,7 +255,7 @@ mod tests {
     #[test]
     fn test_cache_ttl_expiration() {
         let cache = KeyDerivationCache::new(10, Duration::from_millis(50));
-        
+
         // Cache a key
         cache.get_or_derive("test_key", || Ok([42u8; 32])).unwrap();
 

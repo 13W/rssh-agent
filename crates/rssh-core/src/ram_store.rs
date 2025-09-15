@@ -7,10 +7,10 @@ use chacha20poly1305::{
 };
 use rand::RngCore;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, ZeroizeOnDrop};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const KDF_DOMAIN: &str = "rssh-agent:v1:mem";
 const MAX_LOADED_KEYS: usize = 1024;
@@ -190,22 +190,22 @@ impl Default for RamStore {
 
 impl RamStore {
     /// Create a new RAM store
-pub fn new() -> Self {
-    let now = Instant::now();
-    let system_time = std::time::SystemTime::now();
-    RamStore {
-        inner: Arc::new(RwLock::new(RamStoreInner {
-            mem_key: None,
-            keys: HashMap::new(),
-            bruteforce: BruteforceProtection::new(),
-            insertion_order: Vec::new(),
-            last_cleanup: now,
-            last_system_time: system_time,
-            persistent_salt: None,
-        })),
-        cleanup_task: Arc::new(RwLock::new(CleanupTask::new())),
+    pub fn new() -> Self {
+        let now = Instant::now();
+        let system_time = std::time::SystemTime::now();
+        RamStore {
+            inner: Arc::new(RwLock::new(RamStoreInner {
+                mem_key: None,
+                keys: HashMap::new(),
+                bruteforce: BruteforceProtection::new(),
+                insertion_order: Vec::new(),
+                last_cleanup: now,
+                last_system_time: system_time,
+                persistent_salt: None,
+            })),
+            cleanup_task: Arc::new(RwLock::new(CleanupTask::new())),
+        }
     }
-}
 
     /// Check if the store is locked
     pub fn is_locked(&self) -> bool {
@@ -214,18 +214,18 @@ pub fn new() -> Self {
     }
 
     /// Lock the store, zeroizing the memory key
-pub fn lock(&self) -> Result<()> {
-    // Stop cleanup task when locking
-    self.stop_cleanup_task();
+    pub fn lock(&self) -> Result<()> {
+        // Stop cleanup task when locking
+        self.stop_cleanup_task();
 
-    let mut inner = self.inner.write().unwrap();
-    
-    if let Some(mut mem_key) = inner.mem_key.take() {
-        mem_key.key.zeroize();
-        mem_key.salt.zeroize();
+        let mut inner = self.inner.write().unwrap();
+
+        if let Some(mut mem_key) = inner.mem_key.take() {
+            mem_key.key.zeroize();
+            mem_key.salt.zeroize();
+        }
+        Ok(())
     }
-    Ok(())
-}
 
     /// Start the background cleanup task (only if in tokio runtime context)
     pub fn start_cleanup_task(&self) {
@@ -251,7 +251,8 @@ pub fn lock(&self) -> Result<()> {
             // Start new cleanup task
             let shutdown_flag = cleanup_task.shutdown_flag.clone();
             let task_handle = runtime_handle.spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
+                let mut interval =
+                    tokio::time::interval(Duration::from_secs(CLEANUP_INTERVAL_SECS));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
                 while !shutdown_flag.load(Ordering::Relaxed) {
@@ -303,7 +304,8 @@ pub fn lock(&self) -> Result<()> {
         let system_now = std::time::SystemTime::now();
 
         // Check for significant clock changes (system suspend/resume, time adjustment)
-        let time_diff = system_now.duration_since(inner.last_system_time)
+        let time_diff = system_now
+            .duration_since(inner.last_system_time)
             .map(|d| d.as_secs() as i64)
             .unwrap_or_else(|e| -(e.duration().as_secs() as i64));
 
@@ -343,7 +345,8 @@ pub fn lock(&self) -> Result<()> {
         let mut expired_keys = Vec::new();
         for (fingerprint, key) in &inner.keys {
             if let Some(expires_at) = key.lifetime_expires_at
-                && now >= expires_at {
+                && now >= expires_at
+            {
                 expired_keys.push(fingerprint.clone());
                 if expired_keys.len() >= CLEANUP_BATCH_SIZE {
                     break; // Limit batch size to prevent blocking
@@ -380,86 +383,86 @@ pub fn lock(&self) -> Result<()> {
     }
 
     /// Unlock the store with the master password, with anti-bruteforce protection
-pub fn unlock(&self, master_password: &str, config: &crate::config::Config) -> Result<()> {
-    let mut inner = self.inner.write().unwrap();
+    pub fn unlock(&self, master_password: &str, config: &crate::config::Config) -> Result<()> {
+        let mut inner = self.inner.write().unwrap();
 
-    // Check if permanently locked out
-    if inner.bruteforce.is_permanently_locked() {
-        tracing::error!(
-            "Unlock attempt blocked - permanently locked out after {} failed attempts",
-            inner.bruteforce.attempts
-        );
-        return Err(Error::RateLimited(u64::MAX)); // Indicate permanent lockout
-    }
+        // Check if permanently locked out
+        if inner.bruteforce.is_permanently_locked() {
+            tracing::error!(
+                "Unlock attempt blocked - permanently locked out after {} failed attempts",
+                inner.bruteforce.attempts
+            );
+            return Err(Error::RateLimited(u64::MAX)); // Indicate permanent lockout
+        }
 
-    // Check rate limiting
-    if let Some(remaining_secs) = inner.bruteforce.is_rate_limited() {
-        tracing::warn!(
-            "Unlock attempt blocked - rate limited for {} more seconds (attempt {}/{})",
-            remaining_secs,
-            inner.bruteforce.attempts,
-            inner.bruteforce.max_attempts
-        );
-        return Err(Error::RateLimited(remaining_secs));
-    }
+        // Check rate limiting
+        if let Some(remaining_secs) = inner.bruteforce.is_rate_limited() {
+            tracing::warn!(
+                "Unlock attempt blocked - rate limited for {} more seconds (attempt {}/{})",
+                remaining_secs,
+                inner.bruteforce.attempts,
+                inner.bruteforce.max_attempts
+            );
+            return Err(Error::RateLimited(remaining_secs));
+        }
 
-    // Log security status before verification attempt
-    tracing::debug!(
-        "Password verification attempt - security status: {}",
-        inner.bruteforce.security_status()
-    );
-
-    // Verify password against config sentinel
-    if !config.verify_sentinel(master_password) {
-        // Record the failed attempt
-        inner.bruteforce.record_failure();
-
-        tracing::error!(
-            "Password verification failed - security status: {}",
+        // Log security status before verification attempt
+        tracing::debug!(
+            "Password verification attempt - security status: {}",
             inner.bruteforce.security_status()
         );
 
-        return Err(Error::WrongPassword);
+        // Verify password against config sentinel
+        if !config.verify_sentinel(master_password) {
+            // Record the failed attempt
+            inner.bruteforce.record_failure();
+
+            tracing::error!(
+                "Password verification failed - security status: {}",
+                inner.bruteforce.security_status()
+            );
+
+            return Err(Error::WrongPassword);
+        }
+
+        // Password is correct - proceed with unlock
+        tracing::info!("Password verified successfully, unlocking store");
+
+        // Use persistent salt if available, otherwise generate new one
+        let salt = if let Some(existing_salt) = inner.persistent_salt {
+            tracing::debug!("Reusing persistent salt for MemKey consistency");
+            existing_salt
+        } else {
+            // First unlock - generate new salt and store it persistently
+            let mut new_salt = [0u8; 32];
+            OsRng.fill_bytes(&mut new_salt);
+            inner.persistent_salt = Some(new_salt);
+            tracing::debug!("Generated new persistent salt for MemKey");
+            new_salt
+        };
+
+        // Derive memory key
+        let key = derive_mem_key(master_password, &salt)?;
+
+        // Store the key
+        inner.mem_key = Some(MemKey { key, salt });
+
+        // Reset bruteforce protection on successful unlock
+        inner.bruteforce.reset();
+
+        // Update timestamps for cleanup tracking
+        inner.last_cleanup = Instant::now();
+        inner.last_system_time = std::time::SystemTime::now();
+
+        // Drop the write lock before starting cleanup task
+        drop(inner);
+
+        // Start the cleanup task now that we're unlocked
+        self.start_cleanup_task();
+
+        tracing::info!("Store unlocked successfully");
+        Ok(())
     }
-
-    // Password is correct - proceed with unlock
-    tracing::info!("Password verified successfully, unlocking store");
-
-    // Use persistent salt if available, otherwise generate new one
-    let salt = if let Some(existing_salt) = inner.persistent_salt {
-        tracing::debug!("Reusing persistent salt for MemKey consistency");
-        existing_salt
-    } else {
-        // First unlock - generate new salt and store it persistently
-        let mut new_salt = [0u8; 32];
-        OsRng.fill_bytes(&mut new_salt);
-        inner.persistent_salt = Some(new_salt);
-        tracing::debug!("Generated new persistent salt for MemKey");
-        new_salt
-    };
-
-    // Derive memory key
-    let key = derive_mem_key(master_password, &salt)?;
-
-    // Store the key
-    inner.mem_key = Some(MemKey { key, salt });
-
-    // Reset bruteforce protection on successful unlock
-    inner.bruteforce.reset();
-
-    // Update timestamps for cleanup tracking
-    inner.last_cleanup = Instant::now();
-    inner.last_system_time = std::time::SystemTime::now();
-
-    // Drop the write lock before starting cleanup task
-    drop(inner);
-
-    // Start the cleanup task now that we're unlocked
-    self.start_cleanup_task();
-
-    tracing::info!("Store unlocked successfully");
-    Ok(())
-}
 
     /// Load a key from disk into RAM
     pub fn load_key(
@@ -652,7 +655,8 @@ pub fn unlock(&self, master_password: &str, config: &crate::config::Config) -> R
 
         // Check lifetime first, before cleanup
         if let Some(expires_at) = encrypted_key.lifetime_expires_at
-            && Instant::now() >= expires_at {
+            && Instant::now() >= expires_at
+        {
             tracing::info!(
                 "Key access denied - expired: type={}, fingerprint={}",
                 encrypted_key.key_type,
@@ -682,7 +686,12 @@ pub fn unlock(&self, master_password: &str, config: &crate::config::Config) -> R
     }
 
     /// Decrypt a key temporarily for signing with confirmation prompt if needed
-    pub fn with_key_confirmed<F, R>(&self, fingerprint: &str, f: F, confirm_fn: Option<ConfirmFn>) -> Result<R>
+    pub fn with_key_confirmed<F, R>(
+        &self,
+        fingerprint: &str,
+        f: F,
+        confirm_fn: Option<ConfirmFn>,
+    ) -> Result<R>
     where
         F: FnOnce(&[u8]) -> Result<R>,
     {
@@ -694,7 +703,8 @@ pub fn unlock(&self, master_password: &str, config: &crate::config::Config) -> R
 
         // Check lifetime first, before cleanup
         if let Some(expires_at) = encrypted_key.lifetime_expires_at
-            && Instant::now() >= expires_at {
+            && Instant::now() >= expires_at
+        {
             tracing::info!(
                 "Key access denied - expired: type={}, fingerprint={}",
                 encrypted_key.key_type,
@@ -920,20 +930,23 @@ mod tests {
         store.set_constraints("fp1", true, None).unwrap();
 
         // Test with confirmation function that approves
-        let approve_fn = Box::new(|_fp: &str, _desc: &str, _key_type: &str| -> Result<bool> {
-            Ok(true)
-        });
+        let approve_fn =
+            Box::new(|_fp: &str, _desc: &str, _key_type: &str| -> Result<bool> { Ok(true) });
 
-        let result = store.with_key_confirmed("fp1", |_key_data| Ok("signed".to_string()), Some(approve_fn));
+        let result = store.with_key_confirmed(
+            "fp1",
+            |_key_data| Ok("signed".to_string()),
+            Some(approve_fn),
+        );
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "signed");
 
         // Test with confirmation function that denies
-        let deny_fn = Box::new(|_fp: &str, _desc: &str, _key_type: &str| -> Result<bool> {
-            Ok(false)
-        });
+        let deny_fn =
+            Box::new(|_fp: &str, _desc: &str, _key_type: &str| -> Result<bool> { Ok(false) });
 
-        let result = store.with_key_confirmed("fp1", |_key_data| Ok("signed".to_string()), Some(deny_fn));
+        let result =
+            store.with_key_confirmed("fp1", |_key_data| Ok("signed".to_string()), Some(deny_fn));
         assert!(matches!(result, Err(Error::ConfirmationDenied)));
 
         // Test without confirmation function when confirm is required
@@ -944,7 +957,7 @@ mod tests {
         store
             .load_key("fp2", b"data", "test key 2".into(), "ed25519".into(), false)
             .unwrap();
-        
+
         let result = store.with_key_confirmed("fp2", |_key_data| Ok("signed".to_string()), None);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "signed");
@@ -1134,7 +1147,13 @@ mod tests {
         // Load a key with secret data
         let secret_data = b"very_secret_key_material_123456";
         store
-            .load_key("fp1", secret_data, "secret key".into(), "ed25519".into(), false)
+            .load_key(
+                "fp1",
+                secret_data,
+                "secret key".into(),
+                "ed25519".into(),
+                false,
+            )
             .unwrap();
 
         // Set very short lifetime
@@ -1175,7 +1194,8 @@ mod tests {
         });
 
         // Key should be accessible with confirmation initially
-        let result = store.with_key_confirmed("fp1", |_| Ok("confirmed".to_string()), Some(confirm_fn));
+        let result =
+            store.with_key_confirmed("fp1", |_| Ok("confirmed".to_string()), Some(confirm_fn));
         assert!(result.is_ok());
 
         // Wait for expiry
@@ -1187,87 +1207,102 @@ mod tests {
         });
 
         // Key should now be expired and return KeyExpired error (not ConfirmationDenied)
-        let result = store.with_key_confirmed("fp1", |_| Ok("should not work".to_string()), Some(confirm_fn2));
+        let result = store.with_key_confirmed(
+            "fp1",
+            |_| Ok("should not work".to_string()),
+            Some(confirm_fn2),
+        );
         assert!(matches!(result, Err(Error::KeyExpired)));
     }
 
     #[test]
-fn test_lock_unlock_aead_fix() {
-    // This test verifies the fix for the lock/unlock AEAD bug.
-    // Problem: lock would zeroize MemKey but leave encrypted keys in RAM,
-    // then unlock would create a new MemKey with different salt, causing AEAD
-    // decryption failures when trying to access the old encrypted keys.
-    // Solution: Use persistent salt across lock/unlock cycles so MemKey remains consistent.
+    fn test_lock_unlock_aead_fix() {
+        // This test verifies the fix for the lock/unlock AEAD bug.
+        // Problem: lock would zeroize MemKey but leave encrypted keys in RAM,
+        // then unlock would create a new MemKey with different salt, causing AEAD
+        // decryption failures when trying to access the old encrypted keys.
+        // Solution: Use persistent salt across lock/unlock cycles so MemKey remains consistent.
 
-    let store = RamStore::new();
-    let config = create_test_config("test_password");
+        let store = RamStore::new();
+        let config = create_test_config("test_password");
 
-    // Initial unlock
-    store.unlock("test_password", &config).unwrap();
-    assert!(!store.is_locked());
-
-    // Load a test key
-    let test_key_data = b"test_key_data_for_aead_bug_test";
-    store.load_external_key(
-        "test_fp",
-        test_key_data,
-        "Test key".to_string(),
-        "ed25519".to_string(),
-        false,
-    ).unwrap();
-
-    // Verify key is accessible
-    let result = store.with_key("test_fp", |data| {
-        assert_eq!(data, test_key_data);
-        Ok(())
-    });
-    assert!(result.is_ok(), "Key should be accessible after load");
-
-    // Lock the store (does NOT clear keys - only zeroizes MemKey)
-    store.lock().unwrap();
-    assert!(store.is_locked());
-
-    // Unlock again (should reuse persistent salt for MemKey consistency)
-    store.unlock("test_password", &config).unwrap();
-    assert!(!store.is_locked());
-
-    // With the fix: Keys should remain accessible after unlock because
-    // persistent salt ensures MemKey consistency across lock/unlock cycles
-    let result = store.with_key("test_fp", |data| {
-        assert_eq!(data, test_key_data);
-        Ok(())
-    });
-    assert!(result.is_ok(), "Key should remain accessible after lock/unlock cycle");
-
-    // Test multiple lock/unlock cycles to ensure robustness
-    for i in 1..=3 {
-        store.lock().unwrap();
-        assert!(store.is_locked());
-        
+        // Initial unlock
         store.unlock("test_password", &config).unwrap();
         assert!(!store.is_locked());
-        
+
+        // Load a test key
+        let test_key_data = b"test_key_data_for_aead_bug_test";
+        store
+            .load_external_key(
+                "test_fp",
+                test_key_data,
+                "Test key".to_string(),
+                "ed25519".to_string(),
+                false,
+            )
+            .unwrap();
+
+        // Verify key is accessible
         let result = store.with_key("test_fp", |data| {
             assert_eq!(data, test_key_data);
-            Ok(format!("cycle_{}", i))
+            Ok(())
         });
-        assert!(result.is_ok(), "Key should remain accessible after cycle {}", i);
-        assert_eq!(result.unwrap(), format!("cycle_{}", i));
+        assert!(result.is_ok(), "Key should be accessible after load");
+
+        // Lock the store (does NOT clear keys - only zeroizes MemKey)
+        store.lock().unwrap();
+        assert!(store.is_locked());
+
+        // Unlock again (should reuse persistent salt for MemKey consistency)
+        store.unlock("test_password", &config).unwrap();
+        assert!(!store.is_locked());
+
+        // With the fix: Keys should remain accessible after unlock because
+        // persistent salt ensures MemKey consistency across lock/unlock cycles
+        let result = store.with_key("test_fp", |data| {
+            assert_eq!(data, test_key_data);
+            Ok(())
+        });
+        assert!(
+            result.is_ok(),
+            "Key should remain accessible after lock/unlock cycle"
+        );
+
+        // Test multiple lock/unlock cycles to ensure robustness
+        for i in 1..=3 {
+            store.lock().unwrap();
+            assert!(store.is_locked());
+
+            store.unlock("test_password", &config).unwrap();
+            assert!(!store.is_locked());
+
+            let result = store.with_key("test_fp", |data| {
+                assert_eq!(data, test_key_data);
+                Ok(format!("cycle_{}", i))
+            });
+            assert!(
+                result.is_ok(),
+                "Key should remain accessible after cycle {}",
+                i
+            );
+            assert_eq!(result.unwrap(), format!("cycle_{}", i));
+        }
+
+        // Verify we can still load and access new keys after multiple cycles
+        store
+            .load_external_key(
+                "new_fp",
+                b"new_key_data_after_unlock",
+                "New key".to_string(),
+                "ed25519".to_string(),
+                false,
+            )
+            .unwrap();
+
+        let result = store.with_key("new_fp", |data| {
+            assert_eq!(data, b"new_key_data_after_unlock");
+            Ok(())
+        });
+        assert!(result.is_ok(), "New key should be accessible after unlock");
     }
-
-    // Verify we can still load and access new keys after multiple cycles
-    store.load_external_key(
-        "new_fp",
-        b"new_key_data_after_unlock",
-        "New key".to_string(),
-        "ed25519".to_string(),
-        false,
-    ).unwrap();
-
-    let result = store.with_key("new_fp", |data| {
-        assert_eq!(data, b"new_key_data_after_unlock");
-        Ok(())
-    });
-    assert!(result.is_ok(), "New key should be accessible after unlock");
-}
 }

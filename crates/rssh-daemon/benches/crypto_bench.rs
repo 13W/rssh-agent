@@ -1,18 +1,18 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use rssh_core::ram_store::RamStore;
-use rssh_core::config::Config;
-use rssh_daemon::signing;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use ed25519_dalek::{Signer, SigningKey};
-use rsa::{RsaPrivateKey, RsaPublicKey};
-use rsa::traits::{PublicKeyParts, PrivateKeyParts};
-use tempfile::TempDir;
-use sha2::{Sha256, Digest};
-use rssh_proto::wire;
 use rand::rngs::OsRng as RandOsRng;
+use rsa::traits::{PrivateKeyParts, PublicKeyParts};
+use rsa::{RsaPrivateKey, RsaPublicKey};
+use rssh_core::config::Config;
+use rssh_core::ram_store::RamStore;
+use rssh_daemon::signing;
+use rssh_proto::wire;
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
 
 fn benchmark_argon2_kdf(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
-    
+
     c.bench_function("argon2_kdf_256mb", |b| {
         b.iter(|| {
             let config = Config::new_with_sentinel(temp_dir.path(), "test_password_123").unwrap();
@@ -29,7 +29,9 @@ fn benchmark_argon2_kdf(c: &mut Criterion) {
             let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
             let salt = b"test_salt_12345678901234567890";
             let mut key = vec![0u8; 32];
-            argon2.hash_password_into(b"test_password_123", salt, &mut key).unwrap();
+            argon2
+                .hash_password_into(b"test_password_123", salt, &mut key)
+                .unwrap();
             black_box(key)
         })
     });
@@ -42,14 +44,22 @@ fn benchmark_ram_store_operations(c: &mut Criterion) {
     store.unlock("test_password_123", &config).unwrap();
 
     let test_key_data = b"test_key_data_123456789012345678901234567890";
-    
+
     c.bench_function("ram_store_encrypt_decrypt", |b| {
         b.iter(|| {
             let fp = format!("fp{}", rand::random::<u32>());
-            store.load_key(&fp, test_key_data, "test".to_string(), "ed25519".to_string(), false).unwrap();
-            let result = store.with_key(&fp, |data| {
-                Ok(black_box(data.len()))
-            }).unwrap();
+            store
+                .load_key(
+                    &fp,
+                    test_key_data,
+                    "test".to_string(),
+                    "ed25519".to_string(),
+                    false,
+                )
+                .unwrap();
+            let result = store
+                .with_key(&fp, |data| Ok(black_box(data.len())))
+                .unwrap();
             store.unload_key(&fp).unwrap();
             black_box(result)
         })
@@ -59,9 +69,17 @@ fn benchmark_ram_store_operations(c: &mut Criterion) {
         // Load 1000 keys first
         for i in 0..1000 {
             let fp = format!("bench_key_{:04}", i);
-            store.load_key(&fp, test_key_data, "test".to_string(), "ed25519".to_string(), false).unwrap();
+            store
+                .load_key(
+                    &fp,
+                    test_key_data,
+                    "test".to_string(),
+                    "ed25519".to_string(),
+                    false,
+                )
+                .unwrap();
         }
-        
+
         b.iter(|| {
             let keys = store.list_keys().unwrap();
             black_box(keys.len())
@@ -141,7 +159,7 @@ fn benchmark_rsa_signing(c: &mut Criterion) {
 
 fn benchmark_fingerprint_calculation(c: &mut Criterion) {
     let test_public_key = vec![0u8; 32]; // Ed25519 public key size
-    
+
     c.bench_function("fingerprint_sha256", |b| {
         b.iter(|| {
             let mut hasher = Sha256::new();
@@ -154,7 +172,7 @@ fn benchmark_fingerprint_calculation(c: &mut Criterion) {
 
 fn benchmark_memory_operations(c: &mut Criterion) {
     use zeroize::Zeroize;
-    
+
     c.bench_function("zeroize_1kb", |b| {
         b.iter(|| {
             let mut data = vec![42u8; 1024];
@@ -173,7 +191,7 @@ fn benchmark_memory_operations(c: &mut Criterion) {
 }
 
 criterion_group!(
-    benches, 
+    benches,
     benchmark_argon2_kdf,
     benchmark_ram_store_operations,
     benchmark_ed25519_signing,

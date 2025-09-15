@@ -1,13 +1,13 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BatchSize};
-use rssh_daemon::agent::Agent;
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use rssh_core::config::Config;
+use rssh_daemon::agent::Agent;
 use rssh_proto::{messages, wire};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
 
 fn benchmark_agent_operations(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    
+
     c.bench_function("agent_handle_request_identities", |b| {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_123").unwrap();
@@ -46,7 +46,7 @@ fn benchmark_agent_operations(c: &mut Criterion) {
                     black_box((lock_response, unlock_response))
                 })
             },
-            BatchSize::SmallInput
+            BatchSize::SmallInput,
         )
     });
 }
@@ -98,7 +98,7 @@ fn benchmark_wire_format_operations(c: &mut Criterion) {
     c.bench_function("wire_read_string", |b| {
         let mut data = Vec::new();
         wire::write_string(&mut data, b"test_string_data");
-        
+
         b.iter(|| {
             let mut offset = 0;
             let result = wire::read_string(&data, &mut offset);
@@ -109,7 +109,7 @@ fn benchmark_wire_format_operations(c: &mut Criterion) {
 
 fn benchmark_concurrent_operations(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    
+
     c.bench_function("concurrent_request_identities_10", |b| {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_123").unwrap();
@@ -120,13 +120,13 @@ fn benchmark_concurrent_operations(c: &mut Criterion) {
             let agent = agent.clone();
             let msg = msg.clone();
             rt.block_on(async move {
-                let handles: Vec<_> = (0..10).map(|_| {
-                    let agent = agent.clone();
-                    let msg = msg.clone();
-                    tokio::spawn(async move {
-                        agent.handle_message(&msg).await.unwrap()
+                let handles: Vec<_> = (0..10)
+                    .map(|_| {
+                        let agent = agent.clone();
+                        let msg = msg.clone();
+                        tokio::spawn(async move { agent.handle_message(&msg).await.unwrap() })
                     })
-                }).collect();
+                    .collect();
 
                 let mut results = Vec::new();
                 for handle in handles {

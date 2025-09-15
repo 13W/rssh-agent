@@ -6,8 +6,10 @@
 //! - Batch operations for better throughput
 //! - Optimized crypto operations
 
-use crate::{Error, Result, perf_cache::{KeyDerivationCache, ConnectionKeyCache}};
-use sha2::Digest;
+use crate::{
+    Error, Result,
+    perf_cache::{ConnectionKeyCache, KeyDerivationCache},
+};
 use argon2::{Argon2, Params, Version};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
@@ -15,6 +17,7 @@ use chacha20poly1305::{
 };
 use parking_lot::RwLock; // Faster than std::sync::RwLock
 use rand::RngCore;
+use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -52,7 +55,7 @@ impl MemoryPool {
                 return buffer;
             }
         }
-        
+
         // Create new buffer if pool is empty
         Vec::with_capacity(size.max(1024))
     }
@@ -60,15 +63,17 @@ impl MemoryPool {
     fn return_buffer(&self, mut buffer: Vec<u8>) {
         // Zeroize before returning to pool
         buffer.zeroize();
-        
+
         if buffer.capacity() <= 4096 && buffer.capacity() >= 1024 {
             let mut pool = self.small_buffers.write();
-            if pool.len() < 32 { // Limit pool size
+            if pool.len() < 32 {
+                // Limit pool size
                 pool.push(buffer);
             }
         } else if buffer.capacity() <= 65536 && buffer.capacity() >= 4096 {
             let mut pool = self.large_buffers.write();
-            if pool.len() < 16 { // Limit pool size
+            if pool.len() < 16 {
+                // Limit pool size
                 pool.push(buffer);
             }
         }
@@ -137,7 +142,11 @@ impl OptimizedRamStore {
     }
 
     /// Optimized unlock with KDF caching
-    pub fn unlock_optimized(&self, master_password: &str, config: &crate::config::Config) -> Result<()> {
+    pub fn unlock_optimized(
+        &self,
+        master_password: &str,
+        config: &crate::config::Config,
+    ) -> Result<()> {
         // Use faster parameter set for session unlock vs disk encryption
         let session_params = SessionKdfParams {
             memory_kib: 64 * 1024, // 64 MiB instead of 256 MiB
@@ -145,7 +154,14 @@ impl OptimizedRamStore {
             parallelism: 1,
         };
 
-        let cache_key = format!("unlock:{}", sha2::Sha256::digest(master_password.as_bytes()).iter().take(8).map(|b| format!("{:02x}", b)).collect::<String>());
+        let cache_key = format!(
+            "unlock:{}",
+            sha2::Sha256::digest(master_password.as_bytes())
+                .iter()
+                .take(8)
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        );
 
         let derived_key = self.kdf_cache.get_or_derive(&cache_key, || {
             self.derive_session_key(master_password, &session_params)
@@ -206,8 +222,8 @@ impl OptimizedRamStore {
         OsRng.fill_bytes(&mut nonce);
 
         // Encrypt with optimized buffer management
-        let cipher = XChaCha20Poly1305::new_from_slice(mem_key)
-            .map_err(|e| Error::Crypto(e.to_string()))?;
+        let cipher =
+            XChaCha20Poly1305::new_from_slice(mem_key).map_err(|e| Error::Crypto(e.to_string()))?;
         let nonce_obj = XNonce::from_slice(&nonce);
         let ciphertext = cipher
             .encrypt(nonce_obj, request.key_data.as_ref())
@@ -228,7 +244,9 @@ impl OptimizedRamStore {
             updated: None,
         };
 
-        inner.keys.insert(request.fingerprint.clone(), encrypted_key);
+        inner
+            .keys
+            .insert(request.fingerprint.clone(), encrypted_key);
         inner.insertion_order.push(request.fingerprint.clone());
 
         // Return buffer to pool
@@ -260,7 +278,8 @@ impl OptimizedRamStore {
 
             // Check expiration
             if let Some(expires_at) = encrypted_key.lifetime_expires_at
-                && Instant::now() >= expires_at {
+                && Instant::now() >= expires_at
+            {
                 return Err(Error::KeyExpired);
             }
 
@@ -274,7 +293,8 @@ impl OptimizedRamStore {
         };
 
         // Cache the decrypted key for this connection
-        self.connection_cache.cache_key(connection_id, fingerprint, decrypted_key.clone());
+        self.connection_cache
+            .cache_key(connection_id, fingerprint, decrypted_key.clone());
 
         // Use the key
         // Note: We keep the key cached for subsequent operations on this connection
@@ -316,7 +336,7 @@ impl OptimizedRamStore {
     pub fn get_performance_stats(&self) -> PerformanceStats {
         let inner = self.inner.read();
         let cache_stats = self.kdf_cache.stats();
-        
+
         PerformanceStats {
             loaded_keys: inner.keys.len(),
             is_locked: inner.is_locked,
@@ -361,14 +381,14 @@ mod tests {
     #[test]
     fn test_memory_pool() {
         let pool = MemoryPool::new();
-        
+
         // Get a buffer
         let buffer1 = pool.get_buffer(2048);
         assert!(buffer1.capacity() >= 2048);
-        
+
         // Return it
         pool.return_buffer(buffer1);
-        
+
         // Get another - should reuse from pool
         let buffer2 = pool.get_buffer(2048);
         assert!(buffer2.capacity() >= 2048);
@@ -377,10 +397,10 @@ mod tests {
     #[test]
     fn test_optimized_store_basics() {
         let store = OptimizedRamStore::new();
-        
+
         // Should start locked
         assert!(store.inner.read().is_locked);
-        
+
         // Stats should work
         let stats = store.get_performance_stats();
         assert_eq!(stats.loaded_keys, 0);

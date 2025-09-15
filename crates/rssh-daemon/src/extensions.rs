@@ -6,7 +6,9 @@ use std::fs;
 pub const EXTENSION_NAMESPACE: &str = "rssh-agent@local";
 
 /// Helper function to wrap a ManageOperationResponse in ExtensionResponse
-fn wrap_manage_operation_response(response: rssh_proto::cbor::ManageOperationResponse) -> Result<Vec<u8>> {
+fn wrap_manage_operation_response(
+    response: rssh_proto::cbor::ManageOperationResponse,
+) -> Result<Vec<u8>> {
     // Convert to CBOR bytes for the data field
     let mut data_cbor = Vec::new();
     ciborium::into_writer(&response, &mut data_cbor)
@@ -26,7 +28,9 @@ fn wrap_manage_operation_response(response: rssh_proto::cbor::ManageOperationRes
 }
 
 /// Helper function to wrap a ManageCreateResponse in ExtensionResponse
-fn wrap_manage_create_response(response: rssh_proto::cbor::ManageCreateResponse) -> Result<Vec<u8>> {
+fn wrap_manage_create_response(
+    response: rssh_proto::cbor::ManageCreateResponse,
+) -> Result<Vec<u8>> {
     // Convert to CBOR bytes for the data field
     let mut data_cbor = Vec::new();
     ciborium::into_writer(&response, &mut data_cbor)
@@ -71,19 +75,22 @@ pub fn handle_manage_list(
     // Build a set of fingerprints that exist on disk
     let mut disk_fingerprints: HashSet<String> = HashSet::new();
     if let Some(dir) = storage_dir
-        && let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                if let Ok(file_name) = entry.file_name().into_string()
-                    && file_name.starts_with("sha256-") && file_name.ends_with(".json") {
-                        let fingerprint = file_name
-                            .strip_prefix("sha256-")
-                            .and_then(|s| s.strip_suffix(".json"))
-                            .unwrap_or("")
-                            .to_string();
-                        disk_fingerprints.insert(fingerprint);
-                    }
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            if let Ok(file_name) = entry.file_name().into_string()
+                && file_name.starts_with("sha256-")
+                && file_name.ends_with(".json")
+            {
+                let fingerprint = file_name
+                    .strip_prefix("sha256-")
+                    .and_then(|s| s.strip_suffix(".json"))
+                    .unwrap_or("")
+                    .to_string();
+                disk_fingerprints.insert(fingerprint);
             }
         }
+    }
 
     // Convert RAM keys to ManagedKey format
     let mut managed_keys: Vec<ManagedKey> = ram_keys
@@ -262,6 +269,137 @@ pub fn handle_control_shutdown() -> Result<Vec<u8>> {
         .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
 
     Ok(cbor_data)
+}
+
+/// Handle session-bind@openssh.com extension
+pub fn handle_session_bind(data: &[u8]) -> Result<Vec<u8>> {
+    // Parse session-bind data according to OpenSSH PROTOCOL.agent specification:
+    // string hostkey
+    // string session identifier
+    // string signature
+    // bool is_forwarding
+
+    tracing::debug!(
+        "Handling session-bind@openssh.com extension, data length: {}",
+        data.len()
+    );
+
+    let mut offset = 0;
+
+    // For now, we'll implement a basic validation that just parses the structure
+    // without performing cryptographic verification. In a full implementation,
+    // this would verify the signature and maintain session binding state.
+
+    // Read hostkey string
+    if data.len() < offset + 4 {
+        tracing::warn!("session-bind: insufficient data for hostkey length");
+        return Ok(build_session_bind_failure("insufficient data for hostkey"));
+    }
+
+    let hostkey_len = u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ]) as usize;
+    offset += 4;
+
+    if data.len() < offset + hostkey_len {
+        tracing::warn!("session-bind: insufficient data for hostkey");
+        return Ok(build_session_bind_failure("insufficient hostkey data"));
+    }
+
+    let _hostkey = &data[offset..offset + hostkey_len];
+    offset += hostkey_len;
+    tracing::debug!("session-bind: hostkey length: {}", hostkey_len);
+
+    // Read session identifier string
+    if data.len() < offset + 4 {
+        tracing::warn!("session-bind: insufficient data for session ID length");
+        return Ok(build_session_bind_failure(
+            "insufficient data for session ID",
+        ));
+    }
+
+    let session_id_len = u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ]) as usize;
+    offset += 4;
+
+    if data.len() < offset + session_id_len {
+        tracing::warn!("session-bind: insufficient data for session ID");
+        return Ok(build_session_bind_failure("insufficient session ID data"));
+    }
+
+    let _session_id = &data[offset..offset + session_id_len];
+    offset += session_id_len;
+    tracing::debug!("session-bind: session ID length: {}", session_id_len);
+
+    // Read signature string
+    if data.len() < offset + 4 {
+        tracing::warn!("session-bind: insufficient data for signature length");
+        return Ok(build_session_bind_failure(
+            "insufficient data for signature",
+        ));
+    }
+
+    let signature_len = u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ]) as usize;
+    offset += 4;
+
+    if data.len() < offset + signature_len {
+        tracing::warn!("session-bind: insufficient data for signature");
+        return Ok(build_session_bind_failure("insufficient signature data"));
+    }
+
+    let _signature = &data[offset..offset + signature_len];
+    offset += signature_len;
+    tracing::debug!("session-bind: signature length: {}", signature_len);
+
+    // Read is_forwarding boolean
+    if data.len() < offset + 1 {
+        tracing::warn!("session-bind: insufficient data for is_forwarding flag");
+        return Ok(build_session_bind_failure(
+            "insufficient data for forwarding flag",
+        ));
+    }
+
+    let is_forwarding = data[offset] != 0;
+    tracing::debug!("session-bind: is_forwarding: {}", is_forwarding);
+
+    // TODO: In a full implementation, this would:
+    // 1. Verify the signature using the hostkey and session identifier
+    // 2. Check for duplicate session identifiers
+    // 3. Prevent rebinding of connections used for authentication
+    // 4. Store the binding for use in key constraint validation
+
+    // For now, we accept all session-bind requests and return success
+    // This provides OpenSSH compatibility without the security enforcement
+    tracing::info!(
+        "session-bind: Successfully processed session binding (validation not yet implemented)"
+    );
+
+    Ok(build_session_bind_success())
+}
+
+/// Build success response for session-bind extension
+fn build_session_bind_success() -> Vec<u8> {
+    // session-bind responses are simple SSH agent success messages
+    // No extension-specific data is required
+    vec![rssh_proto::wire::MessageType::Success as u8]
+}
+
+/// Build failure response for session-bind extension
+fn build_session_bind_failure(reason: &str) -> Vec<u8> {
+    tracing::warn!("session-bind: Returning failure: {}", reason);
+    vec![rssh_proto::wire::MessageType::Failure as u8]
 }
 
 /// Handle manage.import extension - imports an external key to persistent storage
@@ -910,9 +1048,12 @@ pub async fn handle_manage_create(
     let fingerprint_hex = calculate_fingerprint_hex(&public_key_bytes);
 
     // Convert private key to wire format for consistent storage
-    let wire_key_data = private_key
-        .to_wire_format()
-        .map_err(|e| Error::Internal(format!("Failed to serialize private key to wire format: {}", e)))?;
+    let wire_key_data = private_key.to_wire_format().map_err(|e| {
+        Error::Internal(format!(
+            "Failed to serialize private key to wire format: {}",
+            e
+        ))
+    })?;
     let secret_openssh_b64 = BASE64.encode(&wire_key_data);
 
     // Serialize public key to OpenSSH format for response
@@ -1040,13 +1181,14 @@ fn enumerate_keyfiles(storage_dir: &str) -> Result<Vec<String>> {
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy();
 
-        if file_name.starts_with("sha256-") && file_name.ends_with(".json")
+        if file_name.starts_with("sha256-")
+            && file_name.ends_with(".json")
             && let Some(fingerprint) = file_name
                 .strip_prefix("sha256-")
                 .and_then(|s| s.strip_suffix(".json"))
-            {
-                fingerprints.push(fingerprint.to_string());
-            }
+        {
+            fingerprints.push(fingerprint.to_string());
+        }
     }
 
     Ok(fingerprints)
@@ -1088,7 +1230,6 @@ pub fn build_error_response(error: Error) -> Result<Vec<u8>> {
     Ok(cbor_data)
 }
 
-/// Parse extension request from SSH agent message
 pub fn parse_extension_request(data: &[u8]) -> Result<ExtensionRequest> {
     // Debug: log the raw data
     tracing::debug!(
@@ -1100,7 +1241,7 @@ pub fn parse_extension_request(data: &[u8]) -> Result<ExtensionRequest> {
     // The message format according to OpenSSH protocol is:
     // byte SSH_AGENTC_EXTENSION (27) - already consumed by caller
     // string extension-name
-    // ... extension-specific data (CBOR in our case)
+    // ... extension-specific data (CBOR in our case for rssh-agent@local)
 
     // Note: The message type (27) has already been consumed by the agent,
     // so data[0] is the first byte of the actual extension message.
@@ -1168,25 +1309,44 @@ pub fn parse_extension_request(data: &[u8]) -> Result<ExtensionRequest> {
 
     tracing::debug!("Extension name: {}", ext_name);
 
-    if ext_name != EXTENSION_NAMESPACE {
-        return Err(Error::Internal(format!(
-            "Unknown extension namespace: {}",
-            ext_name
-        )));
+    // Handle different extension namespaces
+    match ext_name {
+        EXTENSION_NAMESPACE => {
+            // Custom rssh-agent@local extensions with CBOR data
+            let cbor_data = &data[offset..];
+            tracing::debug!(
+                "CBOR data (len={}): {:02x?}",
+                cbor_data.len(),
+                &cbor_data[..cbor_data.len().min(50)]
+            );
+
+            let request: ExtensionRequest = ciborium::from_reader(cbor_data)
+                .map_err(|e| Error::Internal(format!("CBOR decoding error: {}", e)))?;
+
+            Ok(request)
+        }
+        "session-bind@openssh.com" => {
+            // OpenSSH session-bind extension with binary data
+            tracing::debug!("Handling OpenSSH session-bind extension");
+
+            // For session-bind, we create a synthetic ExtensionRequest
+            // The actual parsing of session-bind data will be done by the handler
+            Ok(ExtensionRequest {
+                extension: ext_name.to_string(),
+                data: data[offset..].to_vec(),
+            })
+        }
+        _ => {
+            // Other OpenSSH extensions that we don't specifically handle
+            tracing::debug!("Received unknown OpenSSH extension: {}", ext_name);
+
+            // Create a synthetic ExtensionRequest for unknown extensions
+            Ok(ExtensionRequest {
+                extension: ext_name.to_string(),
+                data: data[offset..].to_vec(),
+            })
+        }
     }
-
-    // The rest is CBOR data
-    let cbor_data = &data[offset..];
-    tracing::debug!(
-        "CBOR data (len={}): {:02x?}",
-        cbor_data.len(),
-        &cbor_data[..cbor_data.len().min(50)]
-    );
-
-    let request: ExtensionRequest = ciborium::from_reader(cbor_data)
-        .map_err(|e| Error::Internal(format!("CBOR decoding error: {}", e)))?;
-
-    Ok(request)
 }
 
 /// Build extension response message
@@ -1242,5 +1402,120 @@ mod tests {
         assert!(validate_description("Contains\0null").is_err()); // Null character
         assert!(validate_description("Contains\rcarriage").is_err()); // CR
         assert!(validate_description("Contains\nnewline").is_err()); // LF
+    }
+
+    #[test]
+    fn test_session_bind_extension_parsing() {
+        // Test that we can parse a session-bind extension request
+        let ext_name = "session-bind@openssh.com";
+        let hostkey = b"test hostkey data";
+        let session_id = b"test session identifier";
+        let signature = b"test signature";
+        let is_forwarding = true;
+
+        // Build mock session-bind data according to OpenSSH wire format:
+        // string hostkey
+        // string session identifier
+        // string signature
+        // bool is_forwarding
+        let mut data = Vec::new();
+
+        // Write hostkey string
+        data.extend_from_slice(&(hostkey.len() as u32).to_be_bytes());
+        data.extend_from_slice(hostkey);
+
+        // Write session identifier string
+        data.extend_from_slice(&(session_id.len() as u32).to_be_bytes());
+        data.extend_from_slice(session_id);
+
+        // Write signature string
+        data.extend_from_slice(&(signature.len() as u32).to_be_bytes());
+        data.extend_from_slice(signature);
+
+        // Write is_forwarding boolean
+        data.push(if is_forwarding { 1 } else { 0 });
+
+        // Build the full SSH extension message
+        let mut message = Vec::new();
+
+        // Extension name length and value
+        message.extend_from_slice(&(ext_name.len() as u32).to_be_bytes());
+        message.extend_from_slice(ext_name.as_bytes());
+
+        // Extension data
+        message.extend_from_slice(&data);
+
+        // Test parsing
+        let request = parse_extension_request(&message).unwrap();
+        assert_eq!(request.extension, "session-bind@openssh.com");
+        assert_eq!(request.data, data);
+    }
+
+    #[test]
+    fn test_session_bind_handler() {
+        // Test the session-bind handler with mock data
+        let hostkey = b"test hostkey data";
+        let session_id = b"test session identifier";
+        let signature = b"test signature";
+        let is_forwarding = false;
+
+        // Build session-bind data
+        let mut data = Vec::new();
+
+        // Write hostkey string
+        data.extend_from_slice(&(hostkey.len() as u32).to_be_bytes());
+        data.extend_from_slice(hostkey);
+
+        // Write session identifier string
+        data.extend_from_slice(&(session_id.len() as u32).to_be_bytes());
+        data.extend_from_slice(session_id);
+
+        // Write signature string
+        data.extend_from_slice(&(signature.len() as u32).to_be_bytes());
+        data.extend_from_slice(signature);
+
+        // Write is_forwarding boolean
+        data.push(if is_forwarding { 1 } else { 0 });
+
+        // Test handler
+        let response = handle_session_bind(&data).unwrap();
+
+        // Should return SSH agent success message
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0], rssh_proto::wire::MessageType::Success as u8);
+    }
+
+    #[test]
+    fn test_session_bind_insufficient_data() {
+        // Test session-bind handler with insufficient data
+        let insufficient_data = vec![0, 0, 0]; // Not enough for even hostkey length
+
+        let response = handle_session_bind(&insufficient_data).unwrap();
+
+        // Should return SSH agent failure message
+        assert_eq!(response.len(), 1);
+        assert_eq!(response[0], rssh_proto::wire::MessageType::Failure as u8);
+    }
+
+    #[test]
+    fn test_unknown_openssh_extension() {
+        // Test that unknown OpenSSH extensions are handled gracefully
+        let ext_name = "unknown-ext@openssh.com";
+        let data = b"some extension data";
+
+        // Build the full SSH extension message
+        let mut message = Vec::new();
+
+        // Extension name length and value
+        message.extend_from_slice(&(ext_name.len() as u32).to_be_bytes());
+        message.extend_from_slice(ext_name.as_bytes());
+
+        // Extension data
+        message.extend_from_slice(data);
+
+        // Test parsing
+        let request = parse_extension_request(&message).unwrap();
+        assert_eq!(request.extension, "unknown-ext@openssh.com");
+        assert_eq!(request.data, data);
     }
 }
