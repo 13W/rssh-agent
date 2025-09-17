@@ -115,6 +115,7 @@ pub fn handle_manage_list(
     }
 
     // Convert RAM keys to ManagedKey format
+    // Convert RAM keys to ManagedKey format
     let mut managed_keys: Vec<ManagedKey> = ram_keys
         .into_iter()
         .map(|key| {
@@ -142,6 +143,21 @@ pub fn handle_manage_list(
                 }),
             });
 
+            // For loaded keys that exist on disk, check if they were originally password-protected
+            let originally_password_protected = if key_on_disk {
+                if let (Some(dir), Some(master_pwd)) = (storage_dir, master_password) {
+                    // Try to read metadata to check if key was originally password-protected
+                    match KeyFile::read_metadata(dir, &key.fingerprint, master_pwd) {
+                        Ok(metadata) => metadata.password_protected,
+                        Err(_) => false, // If we can't read metadata, assume not protected
+                    }
+                } else {
+                    false // No master password available, can't determine
+                }
+            } else {
+                false // External keys are not password-protected
+            };
+
             ManagedKey {
                 fp_sha256_hex: key.fingerprint.clone(),
                 key_type: key.key_type,
@@ -151,7 +167,7 @@ pub fn handle_manage_list(
                 loaded: true,  // These are all loaded in RAM
                 has_disk: key_on_disk,  // True if key exists on disk
                 has_cert: key.has_cert,
-                password_protected: false,  // RAM keys are not password-protected
+                password_protected: originally_password_protected,  // Check if originally protected
                 constraints,
                 created: Some(key.created.to_rfc3339()),  // Use actual creation time
                 updated: key.updated.map(|t| t.to_rfc3339()),  // Use actual update time
@@ -465,11 +481,14 @@ pub async fn handle_manage_import(
         // Attempt to parse the key and extract comment
         // Note: For keys in RAM, they are stored in wire format, so we need to convert them back
         // We'll first convert to our internal SSH key format, then to openssh format to parse with ssh-key crate
-        match KeyFile::ssh_key_from_wire_format(&key_data, &match key_info.key_type.as_str() {
-            "ed25519" => KeyType::Ed25519,
-            "rsa" => KeyType::Rsa,
-            _ => KeyType::Ed25519, // fallback, will be handled properly below
-        }) {
+        match KeyFile::ssh_key_from_wire_format(
+            &key_data,
+            &match key_info.key_type.as_str() {
+                "ed25519" => KeyType::Ed25519,
+                "rsa" => KeyType::Rsa,
+                _ => KeyType::Ed25519, // fallback, will be handled properly below
+            },
+        ) {
             Ok(internal_ssh_key) => {
                 // Convert to OpenSSH format (providing both required parameters)
                 match internal_ssh_key.to_openssh(None, None) {
@@ -488,7 +507,9 @@ pub async fn handle_manage_import(
                                         }
                                     }
                                     Err(_) => {
-                                        tracing::debug!("Could not parse OpenSSH key to extract comment");
+                                        tracing::debug!(
+                                            "Could not parse OpenSSH key to extract comment"
+                                        );
                                         None
                                     }
                                 }
@@ -506,7 +527,9 @@ pub async fn handle_manage_import(
                 }
             }
             Err(_) => {
-                tracing::debug!("Could not parse key from wire format to extract comment, using existing description");
+                tracing::debug!(
+                    "Could not parse key from wire format to extract comment, using existing description"
+                );
                 None
             }
         }
@@ -894,6 +917,9 @@ pub async fn handle_manage_load(
     struct LoadRequest {
         fp_sha256_hex: String,
         key_pass_b64: Option<String>,
+        // Constraint support
+        confirm: Option<bool>,
+        lifetime_seconds: Option<u32>,
     }
 
     // Parse the CBOR request data
@@ -956,6 +982,28 @@ pub async fn handle_manage_load(
         key_type_str,
         metadata.has_cert,
     )?;
+
+    // Apply constraints if specified
+    let confirm = request.confirm.unwrap_or(false);
+    let lifetime_secs = request.lifetime_seconds.map(|secs| secs as u64);
+
+    if confirm || lifetime_secs.is_some() {
+        if let Err(e) = ram_store.set_constraints(&request.fp_sha256_hex, confirm, lifetime_secs) {
+            tracing::warn!(
+                "Failed to set constraints for loaded key {}: {}",
+                request.fp_sha256_hex,
+                e
+            );
+            // Key was loaded successfully, but constraints failed - this is not fatal
+        } else {
+            tracing::debug!(
+                "Set constraints for loaded key {}: confirm={}, lifetime={:?}",
+                request.fp_sha256_hex,
+                confirm,
+                lifetime_secs
+            );
+        }
+    }
 
     // Create success response
     let response_data = serde_json::json!({

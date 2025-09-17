@@ -66,6 +66,11 @@ pub struct ManageCreateRequest {
     pub description: Option<String>,
     #[serde(default = "default_load_to_ram")]
     pub load_to_ram: bool, // Whether to load the key to RAM after creation
+    // Constraint support
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<bool>, // Require confirmation for key usage
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifetime_seconds: Option<u32>, // Lifetime constraint in seconds
 }
 
 fn default_load_to_ram() -> bool {

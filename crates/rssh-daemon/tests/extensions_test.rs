@@ -119,7 +119,8 @@ mod integration_tests {
         use rssh_core::config::Config;
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_12345").unwrap();
         let agent = Arc::new(Agent::new(config));
-        let server = SocketServer::new(socket_path.clone(), agent.clone());
+        let shutdown_signal = Arc::new(tokio::sync::Notify::new());
+        let server = SocketServer::new(socket_path.clone(), agent.clone(), shutdown_signal);
 
         // Start the server in a background task
         let server_handle = tokio::spawn(async move { server.run().await });

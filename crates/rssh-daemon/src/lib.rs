@@ -12,6 +12,7 @@ pub mod key_utils;
 pub mod prompt;
 pub mod signing;
 pub mod socket;
+pub mod systemd;
 
 // SSH agent daemon implementation
 pub mod optimized_socket;

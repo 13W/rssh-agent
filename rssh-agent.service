@@ -1,0 +1,43 @@
+[Unit]
+Description=rssh-agent SSH authentication agent
+Documentation=man:rssh-agent(1)
+Requires=rssh-agent.socket
+After=graphical-session.target
+
+[Service]
+Type=simple
+Environment=SSH_AUTH_SOCK=%t/rssh-agent.socket
+ExecStart=/usr/bin/rssh-agent daemon --foreground --dir=%h/.ssh/rssh-agent
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStop=/usr/bin/systemctl --user unset-environment SSH_AUTH_SOCK
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# # Security settings
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ProtectHome=read-only
+# PrivateTmp=true
+# PrivateDevices=true
+# ProtectHostname=true
+# ProtectClock=true
+# ProtectKernelTunables=true
+# ProtectKernelModules=true
+# ProtectKernelLogs=true
+# ProtectControlGroups=true
+# SystemCallFilter=@system-service
+# SystemCallErrorNumber=EPERM
+# RestrictRealtime=true
+# RestrictSUIDSGID=true
+# RemoveIPC=true
+# LockPersonality=true
+# MemoryDenyWriteExecute=true
+
+# # Allow access to user's SSH directory and runtime directory
+# ReadWritePaths=%h/.ssh/rssh-agent %t
+# BindReadOnlyPaths=%h/.ssh
+
+[Install]
+WantedBy=default.target
+Also=rssh-agent.socket

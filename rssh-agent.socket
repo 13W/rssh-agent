@@ -1,0 +1,16 @@
+[Unit]
+Description=rssh-agent SSH authentication socket
+Documentation=man:rssh-agent(1)
+PartOf=rssh-agent.service
+
+[Socket]
+ListenStream=%t/rssh-agent.socket
+SocketMode=0600
+SocketUser=%u
+# DirectoryMode=0700
+# Accept=false
+ExecStartPost=/usr/bin/systemctl --user set-environment SSH_AUTH_SOCK=%t/rssh-agent.socket
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

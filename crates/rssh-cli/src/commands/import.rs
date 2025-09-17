@@ -82,7 +82,7 @@ impl ImportCommand {
                 println!("Successfully imported SSH key:");
                 println!("  Fingerprint: SHA256:{}", import_response.fingerprint);
                 println!("  Description: {}", import_response.description);
-                
+
                 // Show how the description was determined
                 if description.is_some() {
                     println!("  Description source: User-provided");
@@ -91,7 +91,7 @@ impl ImportCommand {
                 } else {
                     println!("  Description source: Filename");
                 }
-                
+
                 if original_was_encrypted {
                     if protect {
                         println!("  Original key was encrypted, now protected with new password");
@@ -156,9 +156,7 @@ fn ask_user_to_load_key() -> Result<bool> {
     io::stdout().flush().map_err(Error::Io)?;
 
     let mut input = String::new();
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(Error::Io)?;
+    io::stdin().read_line(&mut input).map_err(Error::Io)?;
 
     let input = input.trim().to_lowercase();
     Ok(input == "y" || input == "yes")

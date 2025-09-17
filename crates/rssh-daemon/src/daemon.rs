@@ -1,8 +1,8 @@
-use crate::{agent::Agent, socket::SocketServer};
+use crate::{agent::Agent, socket::SocketServer, systemd};
 
-use nix::unistd::{ForkResult, fork, setsid};
 use rssh_core::{Error, Result};
 use std::io::{self, Write};
+use std::os::unix::fs::PermissionsExt;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +16,7 @@ pub struct DaemonConfig {
     pub foreground: bool,
     pub storage_dir: String,
     pub config: rssh_core::config::Config,
+    pub require_mlock: bool,
 }
 
 /// Shell output style
@@ -61,69 +62,76 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     let shutdown_signal = Arc::new(tokio::sync::Notify::new());
 
     // Create the agent with storage directory and shutdown signal
-    // Agent starts in locked state and master password will be set when needed
     let agent = Arc::new(Agent::with_storage_dir_and_shutdown(
         config.storage_dir.clone(),
         config.config.clone(),
         shutdown_signal.clone(),
     ));
 
-    // Create the socket server
-    let server = if let Some(socket_path) = config.socket_path {
-        // If explicit socket path is provided, check if it's alive
-        if check_socket_alive(&socket_path).await {
-            return Err(Error::AlreadyInUse);
+    // Create socket server
+    tracing::info!("Creating socket server with config: socket_path={:?}, foreground={}", config.socket_path, config.foreground);
+    let (server, socket_path, systemd_listener) = if systemd::is_systemd_activated() {
+        tracing::info!("Detected systemd socket activation");
+        let listener = systemd::take_systemd_socket()?;
+        let server = SocketServer::from_listener(agent.clone(), shutdown_signal.clone());
+        (server, String::from("systemd-activated-socket"), Some(listener))
+    } else if let Some(socket_path) = config.socket_path {
+        // For socket paths, ensure the directory exists
+        let socket_path_buf = std::path::PathBuf::from(&socket_path);
+        tracing::info!("Processing socket path: {}", socket_path);
+        if let Some(parent_dir) = socket_path_buf.parent() {
+            tracing::info!("Parent directory: {}", parent_dir.display());
+            if !parent_dir.exists() {
+                tracing::info!("Parent directory does not exist, creating it");
+                // Check if this looks like a temp socket directory (ssh-XXXXXX pattern)
+                if let Some(dir_name) = parent_dir.file_name() {
+                    if let Some(dir_str) = dir_name.to_str() {
+                        tracing::info!("Directory name: '{}', length: {}", dir_str, dir_str.len());
+                        if dir_str.starts_with("ssh-") && dir_str.len() == 10 {
+                            // This is a temp directory - create it with proper permissions
+                            tracing::info!("Creating temp socket directory: {}", parent_dir.display());
+                            std::fs::create_dir_all(parent_dir)?;
+                            std::fs::set_permissions(parent_dir, std::fs::Permissions::from_mode(0o700))?;
+                            tracing::info!("Successfully created temp socket directory: {}", parent_dir.display());
+                        } else {
+                            // Regular directory path
+                            tracing::info!("Creating regular directory: {}", parent_dir.display());
+                            std::fs::create_dir_all(parent_dir)?;
+                            std::fs::set_permissions(parent_dir, std::fs::Permissions::from_mode(0o700))?;
+                        }
+                    } else {
+                        tracing::warn!("Could not convert directory name to string");
+                    }
+                } else {
+                    tracing::info!("No directory name found, creating regular directory");
+                    // Regular directory path
+                    std::fs::create_dir_all(parent_dir)?;
+                    std::fs::set_permissions(parent_dir, std::fs::Permissions::from_mode(0o700))?;
+                }
+            } else {
+                tracing::info!("Parent directory already exists: {}", parent_dir.display());
+            }
+        } else {
+            tracing::warn!("No parent directory found for socket path: {}", socket_path);
         }
-        SocketServer::new(socket_path.into(), agent.clone())
+        let server = SocketServer::new(socket_path.clone().into(), agent.clone(), shutdown_signal.clone());
+        (server, socket_path, None)
     } else {
-        // No explicit socket path, check SSH_AUTH_SOCK
-        if let Ok(existing_sock) = std::env::var("SSH_AUTH_SOCK")
-            && check_socket_alive(&existing_sock).await
-        {
-            return Err(Error::AlreadyRunning);
-        }
-        SocketServer::create_temp_socket(agent.clone())?
+        // No socket path provided, create temp socket
+        let server = SocketServer::create_temp_socket(agent.clone(), shutdown_signal.clone())?;
+        let path = server.socket_path().expect("Temp socket should have path").to_string_lossy().to_string();
+        (server, path, None)
     };
 
-    let socket_path = server.socket_path().to_string_lossy().to_string();
-
-    // Fork to background unless --foreground
-    if !config.foreground {
-        match unsafe { fork() } {
-            Ok(ForkResult::Parent { child }) => {
-                // Parent process: print socket info and exit
-                let style = shell_style.unwrap_or_else(ShellStyle::detect);
-                println!("{}", style.format_export(&socket_path));
-
-                tracing::debug!("Daemon forked with PID {}", child);
-                return Ok(());
-            }
-            Ok(ForkResult::Child) => {
-                // Child process: become a daemon
-                setsid().map_err(|e| Error::Io(e.into()))?;
-
-                // Close standard file descriptors
-                let devnull = std::fs::File::open("/dev/null")?;
-                let devnull_fd = devnull.as_raw_fd();
-                unsafe {
-                    libc::dup2(devnull_fd, 0);
-                    libc::dup2(devnull_fd, 1);
-                    libc::dup2(devnull_fd, 2);
-                }
-            }
-            Err(e) => {
-                return Err(Error::Io(e.into()));
-            }
-        }
-    } else {
-        // Foreground mode: print socket info and continue
+    // Print socket info if in foreground mode and not systemd activated
+    if config.foreground && systemd_listener.is_none() {
         let style = shell_style.unwrap_or_else(ShellStyle::detect);
         println!("{}", style.format_export(&socket_path));
         io::stdout().flush()?;
     }
 
     // Apply security hardening
-    apply_hardening(false)?; // Default to non-strict memory locking
+    apply_hardening(config.require_mlock)?;
 
     // Set up signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -131,45 +139,34 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     let mut sighup = signal(SignalKind::hangup())?;
 
     let agent_for_signals = agent.clone();
-    let server_for_cleanup = Arc::new(server);
+    let server_for_cleanup: Arc<SocketServer> = Arc::new(server);
     let server_for_run = server_for_cleanup.clone();
 
-    // Spawn enhanced signal handler task
+    // Spawn signal handler task
     let shutdown_signal_clone = shutdown_signal.clone();
-
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 _ = sigterm.recv() => {
                     tracing::info!("Received SIGTERM, initiating graceful shutdown");
-
-                    // Shutdown the agent with proper secret zeroization
                     if let Err(e) = agent_for_signals.shutdown().await {
                         tracing::error!("Failed to shutdown agent cleanly: {}", e);
                     }
-
-                    // Signal main loop to stop
                     RUNNING.store(false, Ordering::Relaxed);
                     shutdown_signal_clone.notify_one();
                     break;
                 }
                 _ = sigint.recv() => {
                     tracing::info!("Received SIGINT (Ctrl+C), initiating graceful shutdown");
-
-                    // Shutdown the agent with proper secret zeroization
                     if let Err(e) = agent_for_signals.shutdown().await {
                         tracing::error!("Failed to shutdown agent cleanly: {}", e);
                     }
-
-                    // Signal main loop to stop
                     RUNNING.store(false, Ordering::Relaxed);
                     shutdown_signal_clone.notify_one();
                     break;
                 }
                 _ = sighup.recv() => {
                     tracing::info!("Received SIGHUP, locking agent for configuration reload");
-
-                    // Lock the agent (compatible with OpenSSH behavior)
                     let lock_message = [22u8]; // SSH_AGENTC_LOCK message type
                     match agent_for_signals.handle_message(&lock_message).await {
                         Ok(_) => {
@@ -185,7 +182,11 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     });
 
     // Run the server
-    let server_task = tokio::spawn(async move { server_for_run.run().await });
+    let server_task = if let Some(listener) = systemd_listener {
+        tokio::spawn(async move { server_for_run.run_with_listener(listener).await })
+    } else {
+        tokio::spawn(async move { server_for_run.run().await })
+    };
 
     // Wait for shutdown signal or server completion
     tokio::select! {
@@ -209,14 +210,9 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
 
     // Graceful shutdown sequence
     tracing::info!("Starting graceful shutdown sequence");
-
-    // Stop the running flag
     RUNNING.store(false, Ordering::Relaxed);
-
-    // Give server a moment to finish current operations
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
-    // Clean up socket
     if let Err(e) = server_for_cleanup.cleanup() {
         tracing::warn!("Failed to cleanup socket: {}", e);
     } else {
@@ -227,16 +223,8 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     Ok(())
 }
 
-/// Check if a socket is alive
-async fn check_socket_alive(socket_path: &str) -> bool {
-    use tokio::net::UnixStream;
-    use tokio::time::{Duration, timeout};
 
-    let connect_result =
-        timeout(Duration::from_millis(100), UnixStream::connect(socket_path)).await;
 
-    matches!(connect_result, Ok(Ok(_)))
-}
 
 /// Apply security hardening
 pub fn apply_hardening(require_mlock: bool) -> Result<()> {
@@ -299,7 +287,6 @@ pub fn apply_hardening(require_mlock: bool) -> Result<()> {
     Ok(())
 }
 
-use std::os::unix::io::AsRawFd;
 
 #[cfg(test)]
 mod tests {

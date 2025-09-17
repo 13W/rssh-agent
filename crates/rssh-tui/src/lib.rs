@@ -145,6 +145,60 @@ fn format_lifetime_friendly(seconds: u32) -> String {
     }
 }
 
+/// Calculate remaining lifetime for a key based on its constraints
+fn calculate_remaining_lifetime(constraints: &serde_json::Value) -> Option<String> {
+    if let Some(lifetime_expires_at) = constraints.get("lifetime_expires_at") {
+        if let Some(expires_str) = lifetime_expires_at.as_str() {
+            // Parse the ISO timestamp
+            if let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_str) {
+                let now = chrono::Utc::now();
+                let expires_utc = expires_at.with_timezone(&chrono::Utc);
+
+                if expires_utc > now {
+                    let duration = expires_utc - now;
+                    let total_seconds = duration.num_seconds();
+
+                    if total_seconds <= 0 {
+                        return Some("EXPIRED".to_string());
+                    }
+
+                    // Format the remaining time
+                    if total_seconds >= 86400 {
+                        let days = total_seconds / 86400;
+                        let hours = (total_seconds % 86400) / 3600;
+                        if hours > 0 {
+                            return Some(format!("{}d{}h", days, hours));
+                        } else {
+                            return Some(format!("{}d", days));
+                        }
+                    } else if total_seconds >= 3600 {
+                        let hours = total_seconds / 3600;
+                        let minutes = (total_seconds % 3600) / 60;
+                        if minutes > 0 {
+                            return Some(format!("{}h{}m", hours, minutes));
+                        } else {
+                            return Some(format!("{}h", hours));
+                        }
+                    } else if total_seconds >= 60 {
+                        let minutes = total_seconds / 60;
+                        let seconds = total_seconds % 60;
+                        if seconds > 0 {
+                            return Some(format!("{}m{}s", minutes, seconds));
+                        } else {
+                            return Some(format!("{}m", minutes));
+                        }
+                    } else {
+                        return Some(format!("{}s", total_seconds));
+                    }
+                } else {
+                    return Some("EXPIRED".to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(PartialEq, Clone)]
 pub enum ConstraintStep {
     SelectOptions,
@@ -1473,9 +1527,33 @@ fn ui(f: &mut Frame, app: &App) {
                     spans.push(Span::styled(" [CERT]", Style::default().fg(Color::Magenta)));
                 }
 
-                // Show if password protected
+                // Show if password protected or unlocked protected key
                 if key.password_protected {
-                    spans.push(Span::styled(" [🔒]", Style::default().fg(Color::Blue)));
+                    // Check if this is an unlocked protected key (loaded and password_protected)
+                    if key.loaded {
+                        spans.push(Span::styled(" [🔓]", Style::default().fg(Color::Green)));
+                    } else {
+                        spans.push(Span::styled(" [🔒]", Style::default().fg(Color::Blue)));
+                    }
+                }
+
+                // Show lifetime counter if key has lifetime constraint
+                if let Some(remaining) = calculate_remaining_lifetime(&key.constraints) {
+                    let color = if remaining == "EXPIRED" {
+                        Color::Red
+                    } else if remaining.contains("s")
+                        && !remaining.contains("m")
+                        && !remaining.contains("h")
+                        && !remaining.contains("d")
+                    {
+                        Color::Yellow // Less than a minute
+                    } else {
+                        Color::Cyan
+                    };
+                    spans.push(Span::styled(
+                        format!(" [{}]", remaining),
+                        Style::default().fg(color),
+                    ));
                 }
 
                 // Show constraints if any
@@ -1640,7 +1718,7 @@ fn load_keys(
 
             let keys_data = list_response.keys;
 
-            app.keys = keys_data
+            let mut keys: Vec<KeyInfo> = keys_data
                 .into_iter()
                 .map(|k| KeyInfo {
                     fingerprint: k.fp_sha256_hex,
@@ -1657,6 +1735,11 @@ fn load_keys(
                     updated: k.updated,
                 })
                 .collect();
+
+            // Sort keys alphabetically by description
+            keys.sort_by(|a, b| a.description.cmp(&b.description));
+
+            app.keys = keys;
 
             // Update selection
             if !app.keys.is_empty() && app.list_state.selected().is_none() {
