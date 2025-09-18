@@ -39,9 +39,6 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
 
-[build-dependencies]
-cargo-deb = "2.7"
-
 [features]
 default = ["tui"]
 tui = ["dep:rssh-tui"]

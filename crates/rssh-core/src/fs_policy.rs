@@ -5,7 +5,6 @@ use rand::RngCore;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
 /// Ensure directory exists with secure permissions (0700) and is owned by current user
@@ -44,8 +43,7 @@ pub fn ensure_dir_secure<P: AsRef<Path>>(path: P) -> Result<()> {
 
 /// Ensure file has mode 0600
 pub fn ensure_file_mode_0600(file: &File) -> Result<()> {
-    let fd = file.as_raw_fd();
-    fchmod(fd, Mode::from_bits_truncate(0o600)).map_err(|e| Error::Io(std::io::Error::from(e)))?;
+    fchmod(file, Mode::from_bits_truncate(0o600)).map_err(|e| Error::Io(std::io::Error::from(e)))?;
     Ok(())
 }
 
@@ -66,7 +64,7 @@ pub fn atomic_write<P: AsRef<Path>>(path: P, data: &[u8]) -> Result<()> {
 
     // Generate temporary filename
     let pid = std::process::id();
-    let rand_num: u32 = rand::thread_rng().next_u32();
+    let rand_num: u32 = rand::rng().next_u32();
     let tmp_name = format!(".tmp.{}.{}", pid, rand_num);
     let tmp_path = parent.join(&tmp_name);
 

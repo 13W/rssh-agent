@@ -2,6 +2,7 @@ use rssh_core::{Error, Result, ram_store::KeyInfo};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
+use rand_core::OsRng;
 
 pub const EXTENSION_NAMESPACE: &str = "rssh-agent@local";
 
@@ -805,7 +806,7 @@ pub async fn handle_manage_import_direct(data: &[u8], master_password: &str) -> 
             // Encrypt with new password
             tracing::debug!("Encrypting key with new password");
             let protected_key = decrypted_key
-                .encrypt(&mut rand::thread_rng(), pass_string.as_bytes())
+                .encrypt(&mut OsRng, pass_string.as_bytes())
                 .map_err(|e| {
                     Error::Internal(format!("Failed to encrypt key with new password: {}", e))
                 })?;

@@ -1,4 +1,5 @@
 use crate::{Error, Result};
+use chacha20poly1305::aead::OsRng;
 use ssh_key::{
     Algorithm, LineEnding,
     private::{Ed25519Keypair, KeypairData, PrivateKey, RsaKeypair},
@@ -74,7 +75,7 @@ impl SshPrivateKey {
             // Clone and encrypt the key
             let key = self.inner.clone();
             let encrypted = key
-                .encrypt(&mut rand::thread_rng(), pass.as_bytes())
+                .encrypt(&mut OsRng, pass.as_bytes())
                 .map_err(|e| Error::Crypto(e.to_string()))?;
 
             encrypted
@@ -216,7 +217,7 @@ impl SshPrivateKey {
 
     /// Generate a new Ed25519 key
     pub fn generate_ed25519() -> Result<Self> {
-        let keypair = Ed25519Keypair::random(&mut rand::thread_rng());
+        let keypair = Ed25519Keypair::random(&mut OsRng);
         let key_data = KeypairData::Ed25519(keypair);
 
         // Create PrivateKey with the keypair data
@@ -236,7 +237,7 @@ impl SshPrivateKey {
             return Err(Error::RsaTooLarge);
         }
 
-        let keypair = RsaKeypair::random(&mut rand::thread_rng(), bits)
+        let keypair = RsaKeypair::random(&mut OsRng, bits)
             .map_err(|e| Error::Crypto(e.to_string()))?;
         let key_data = KeypairData::Rsa(keypair);
 

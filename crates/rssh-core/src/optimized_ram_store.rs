@@ -16,7 +16,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, OsRng},
 };
 use parking_lot::RwLock; // Faster than std::sync::RwLock
-use rand::RngCore;
+use ssh_key::rand_core::RngCore;
 use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
