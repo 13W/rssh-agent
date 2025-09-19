@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod daemon;
+pub mod dbus_notifications;
 pub mod extensions;
 pub mod key_utils;
 pub mod prompt;

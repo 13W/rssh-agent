@@ -32,6 +32,8 @@ argon2.workspace = true
 ssh-key = { workspace = true }
 parking_lot = "0.12.4"
 uuid = "1.18.1"
+zbus = "5.0"
+tokio-stream = "0.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

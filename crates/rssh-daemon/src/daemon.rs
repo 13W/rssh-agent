@@ -66,7 +66,7 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
         config.storage_dir.clone(),
         config.config.clone(),
         shutdown_signal.clone(),
-    ));
+    ).await);
 
     // Create socket server
     tracing::info!("Creating socket server with config: socket_path={:?}, foreground={}", config.socket_path, config.foreground);

@@ -308,7 +308,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_12345").unwrap();
-        let agent = Arc::new(Agent::new(config));
+        let agent = Arc::new(Agent::new(config).await);
         let socket_path = temp_dir.path().join("test.sock");
         let shutdown_signal = Arc::new(tokio::sync::Notify::new());
 
@@ -325,7 +325,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_12345").unwrap();
-        let agent = Arc::new(Agent::new(config));
+        let agent = Arc::new(Agent::new(config).await);
         let shutdown_signal = Arc::new(tokio::sync::Notify::new());
         let server = SocketServer::create_temp_socket(agent, shutdown_signal).unwrap();
 
@@ -350,7 +350,7 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_12345").unwrap();
-        let agent = Arc::new(Agent::new(config));
+        let agent = Arc::new(Agent::new(config).await);
         let shutdown_signal = Arc::new(tokio::sync::Notify::new());
 
         // Create a socket path with a non-existent parent directory

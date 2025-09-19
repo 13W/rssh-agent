@@ -1,4 +1,3 @@
-use crate::prompt::PrompterDecision;
 use rssh_core::{Result, config::Config, ram_store::RamStore};
 use rssh_proto::{messages, wire};
 use std::sync::Arc;
@@ -19,11 +18,14 @@ pub struct Agent {
     #[allow(dead_code)] // Reserved for future configuration use
     config: Arc<Config>,
     shutdown_signal: Option<Arc<tokio::sync::Notify>>,
+    dbus_notifications: Arc<crate::dbus_notifications::DbusNotificationService>,
 }
 
 impl Agent {
     /// Create a new agent
-    pub fn new(config: Config) -> Self {
+    pub async fn new(config: Config) -> Self {
+        let dbus_notifications = Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
+        
         Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(false)), // Start unlocked - only lock when user sends LOCK command
@@ -31,11 +33,14 @@ impl Agent {
             master_password: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             shutdown_signal: None,
+            dbus_notifications,
         }
     }
 
     /// Create a new agent with storage directory
-    pub fn with_storage_dir(storage_dir: String, config: Config) -> Self {
+    pub async fn with_storage_dir(storage_dir: String, config: Config) -> Self {
+        let dbus_notifications = Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
+        
         Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(false)), // Start unlocked - only lock when user sends LOCK command
@@ -43,15 +48,18 @@ impl Agent {
             master_password: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             shutdown_signal: None,
+            dbus_notifications,
         }
     }
 
     /// Create a new agent with storage directory and shutdown signal
-    pub fn with_storage_dir_and_shutdown(
+    pub async fn with_storage_dir_and_shutdown(
         storage_dir: String,
         config: Config,
         shutdown_signal: Arc<tokio::sync::Notify>,
     ) -> Self {
+        let dbus_notifications = Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
+        
         Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(true)), // Start locked - user must unlock with master password
@@ -59,6 +67,7 @@ impl Agent {
             master_password: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
             shutdown_signal: Some(shutdown_signal),
+            dbus_notifications,
         }
     }
 
@@ -213,21 +222,35 @@ impl Agent {
         hasher.update(&request.key_blob);
         let fingerprint = hex::encode(hasher.finalize());
 
-        // Create confirmation function for keys that require it
+        // Create confirmation function that uses D-Bus notifications
+        let dbus_notifications = self.dbus_notifications.clone();
         let confirm_fn = Box::new(
-            |fingerprint: &str, description: &str, key_type: &str| -> Result<bool> {
-                let prompter = PrompterDecision::choose().ok_or_else(|| {
-                    rssh_core::Error::Internal("No prompt method available".into())
-                })?;
+            move |fingerprint: &str, description: &str, key_type: &str| -> Result<bool> {
+                // Use tokio runtime to run async code in sync context
+                let rt = tokio::runtime::Handle::current();
+                
+                rt.block_on(async {
+                    if dbus_notifications.is_available() {
+                        // Use D-Bus notifications for approval with 30 second timeout
+                        dbus_notifications
+                            .request_key_approval(fingerprint, description, key_type, 30)
+                            .await
+                    } else {
+                        // Fallback to the original prompt system if D-Bus is not available
+                        let prompter = crate::prompt::PrompterDecision::choose().ok_or_else(|| {
+                            rssh_core::Error::Internal("No prompt method available".into())
+                        })?;
 
-                let prompt_text = format!(
-                    "Allow use of {} key '{}' ({})?",
-                    key_type,
-                    description,
-                    &fingerprint[..12]
-                );
+                        let prompt_text = format!(
+                            "Allow use of {} key '{}' ({})?\n\n[D-Bus notifications unavailable - using fallback prompt]",
+                            key_type,
+                            description,
+                            &fingerprint[..12]
+                        );
 
-                prompter.confirm(&prompt_text)
+                        prompter.confirm(&prompt_text)
+                    }
+                })
             },
         );
 
@@ -923,7 +946,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp.path(), "test_password_12345").unwrap();
-        let agent = Agent::new(config);
+        let agent = Agent::new(config).await;
 
         // Set the master password so unlock operations can work
         agent
@@ -988,7 +1011,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp.path(), "test_password_12345").unwrap();
-        let agent = Agent::new(config);
+        let agent = Agent::new(config).await;
 
         // Set the master password so unlock operations can work
         agent
@@ -1035,7 +1058,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp.path(), "test_password_12345").unwrap();
-        let agent = Agent::new(config);
+        let agent = Agent::new(config).await;
 
         // Set agent to unlocked state and lock with passphrase
         {
@@ -1070,7 +1093,7 @@ mod tests {
 
         let temp = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp.path(), "test_password_12345").unwrap();
-        let agent = Agent::new(config);
+        let agent = Agent::new(config).await;
 
         // Set agent to unlocked state to test removal
         {
