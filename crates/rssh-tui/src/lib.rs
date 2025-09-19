@@ -408,9 +408,6 @@ fn run_app<B: Backend>(
                     KeyCode::Char('h') | KeyCode::Char('?') => {
                         app.show_help = !app.show_help;
                     }
-                    KeyCode::Char('a') => {
-                        app.set_status("Use ssh-add to add keys".to_string());
-                    }
                     KeyCode::Char('L') => {
                         // Load selected disk key into memory with constraints
                         if let Some(idx) = app.selected_key
@@ -1382,10 +1379,6 @@ fn ui(f: &mut Frame, app: &App) {
             Line::from(vec![
                 Span::styled("r/F5", Style::default().fg(Color::Yellow)),
                 Span::raw("   Refresh key list"),
-            ]),
-            Line::from(vec![
-                Span::styled("a", Style::default().fg(Color::Yellow)),
-                Span::raw("      Add key (use ssh-add)"),
             ]),
             Line::from(vec![
                 Span::styled("h/?", Style::default().fg(Color::Yellow)),
