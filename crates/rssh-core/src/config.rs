@@ -62,7 +62,7 @@ impl Config {
         // Generate random salt and nonce
         let mut salt = [0u8; 32];
         let mut nonce_bytes = [0u8; 24];
-        use ssh_key::rand_core::RngCore;
+        use chacha20poly1305::aead::rand_core::RngCore;
         OsRng.fill_bytes(&mut salt);
         OsRng.fill_bytes(&mut nonce_bytes);
 

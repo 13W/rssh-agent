@@ -6,7 +6,7 @@ use chacha20poly1305::{
     aead::{Aead, KeyInit, OsRng},
 };
 use chrono::{DateTime, Utc};
-use ssh_key::rand_core::RngCore;
+use chacha20poly1305::aead::rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;

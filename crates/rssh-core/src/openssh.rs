@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use chacha20poly1305::aead::OsRng;
+use rand08::rngs::OsRng;
 use ssh_key::{
     Algorithm, LineEnding,
     private::{Ed25519Keypair, KeypairData, PrivateKey, RsaKeypair},

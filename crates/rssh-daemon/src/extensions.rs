@@ -2,7 +2,7 @@ use rssh_core::{Error, Result, ram_store::KeyInfo};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
-use rand_core::OsRng;
+use rand08::rngs::OsRng;
 
 pub const EXTENSION_NAMESPACE: &str = "rssh-agent@local";
 
