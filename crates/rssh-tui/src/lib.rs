@@ -44,7 +44,6 @@ pub struct App {
     pub should_quit: bool,
     pub key_being_loaded: Option<String>, // Fingerprint of key being loaded with password
     pub key_load_password: Option<String>, // Temporarily stores password for loading operations
-    pub old_password_buffer: String,      // For change password workflow
     pub create_key_type: Option<String>,  // For key creation workflow
     pub create_bit_length: Option<u32>,   // For RSA key creation
     // Constraint selection state
@@ -218,8 +217,6 @@ pub enum InputMode {
     KeyPassword,
     Confirm,
     Description,
-    ChangePasswordOld,
-    ChangePasswordNew,
     Certificate,
     CreateKeyType,
     CreateBitLength,
@@ -256,7 +253,6 @@ impl App {
             should_quit: false,
             key_being_loaded: None,
             key_load_password: None,
-            old_password_buffer: String::new(),
             create_key_type: None,
             create_bit_length: None,
             constraint_confirm: false,
@@ -514,13 +510,6 @@ fn run_app<B: Backend>(
                                 ));
                             }
                         }
-                    }
-                    KeyCode::Char('c') => {
-                        // Change master password
-                        app.input_mode = InputMode::ChangePasswordOld;
-                        app.input_buffer.clear();
-                        app.old_password_buffer.clear();
-                        app.set_status("Enter current master password:".to_string());
                     }
                     KeyCode::Char('C') => {
                         // Update certificate for selected key
@@ -937,59 +926,6 @@ fn run_app<B: Backend>(
                     }
                     _ => {}
                 },
-                InputMode::ChangePasswordOld => match key.code {
-                    KeyCode::Enter => {
-                        app.old_password_buffer = app.input_buffer.clone();
-                        app.input_buffer.clear();
-                        app.input_mode = InputMode::ChangePasswordNew;
-                        app.set_status("Enter new master password:".to_string());
-                    }
-                    KeyCode::Esc => {
-                        app.input_buffer.clear();
-                        app.old_password_buffer.clear();
-                        app.input_mode = InputMode::Normal;
-                        app.clear_status();
-                    }
-                    KeyCode::Char(c) => {
-                        app.input_buffer.push(c);
-                    }
-                    KeyCode::Backspace => {
-                        app.input_buffer.pop();
-                    }
-                    _ => {}
-                },
-                InputMode::ChangePasswordNew => match key.code {
-                    KeyCode::Enter => {
-                        match change_master_password(
-                            socket_path.as_ref(),
-                            &app.old_password_buffer,
-                            &app.input_buffer,
-                        ) {
-                            Ok(()) => {
-                                app.set_status("Master password changed successfully".to_string());
-                            }
-                            Err(e) => {
-                                app.set_status(format!("Failed to change password: {}", e));
-                            }
-                        }
-                        app.input_buffer.clear();
-                        app.old_password_buffer.clear();
-                        app.input_mode = InputMode::Normal;
-                    }
-                    KeyCode::Esc => {
-                        app.input_buffer.clear();
-                        app.old_password_buffer.clear();
-                        app.input_mode = InputMode::Normal;
-                        app.clear_status();
-                    }
-                    KeyCode::Char(c) => {
-                        app.input_buffer.push(c);
-                    }
-                    KeyCode::Backspace => {
-                        app.input_buffer.pop();
-                    }
-                    _ => {}
-                },
                 InputMode::Certificate => match key.code {
                     KeyCode::Enter => {
                         if let Some(idx) = app.selected_key
@@ -1397,10 +1333,6 @@ fn ui(f: &mut Frame, app: &App) {
                 Span::styled("u", Style::default().fg(Color::Yellow)),
                 Span::raw("      Unlock agent"),
             ]),
-            Line::from(vec![
-                Span::styled("c", Style::default().fg(Color::Yellow)),
-                Span::raw("      Change master password"),
-            ]),
             Line::from(""),
             Line::from(vec![Span::styled(
                 "Key Operations:",
@@ -1605,10 +1537,6 @@ fn ui(f: &mut Frame, app: &App) {
             "Confirm import password: {}",
             "*".repeat(app.input_buffer.len())
         )
-    } else if app.input_mode == InputMode::ChangePasswordOld {
-        format!("Current password: {}", "*".repeat(app.input_buffer.len()))
-    } else if app.input_mode == InputMode::ChangePasswordNew {
-        format!("New password: {}", "*".repeat(app.input_buffer.len()))
     } else if app.input_mode == InputMode::Description {
         format!("Description: {}", app.input_buffer)
     } else if app.input_mode == InputMode::Certificate {
@@ -2290,111 +2218,6 @@ fn set_key_description(
     }
 }
 
-fn change_master_password(
-    socket_path: Option<&String>,
-    old_password: &str,
-    new_password: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let socket = socket_path
-        .cloned()
-        .or_else(|| std::env::var("SSH_AUTH_SOCK").ok())
-        .ok_or("No socket path available")?;
-
-    use std::io::{Read, Write};
-    use std::os::unix::net::UnixStream;
-
-    let mut stream = UnixStream::connect(&socket)?;
-
-    // Build CBOR request for manage.change_pass
-    use rssh_proto::cbor::ExtensionRequest;
-    let change_pass_data = {
-        #[derive(serde::Serialize)]
-        struct ChangePassRequest {
-            old_password: String,
-            new_password: String,
-        }
-
-        let req = ChangePassRequest {
-            old_password: old_password.to_string(),
-            new_password: new_password.to_string(),
-        };
-
-        let mut cbor = Vec::new();
-        ciborium::into_writer(&req, &mut cbor)?;
-        cbor
-    };
-
-    let request = ExtensionRequest {
-        extension: "manage.change_pass".to_string(),
-        data: change_pass_data,
-    };
-
-    let mut cbor_data = Vec::new();
-    ciborium::into_writer(&request, &mut cbor_data)?;
-
-    // Build SSH protocol message with extension namespace
-    let mut message = Vec::new();
-    message.push(rssh_proto::messages::SSH_AGENTC_EXTENSION);
-
-    // Add extension namespace
-    let ext_namespace = b"rssh-agent@local";
-    message.extend_from_slice(&(ext_namespace.len() as u32).to_be_bytes());
-    message.extend_from_slice(ext_namespace);
-
-    // Add CBOR data
-    message.extend_from_slice(&cbor_data);
-
-    // Add length prefix for the whole message
-    let mut full_message = Vec::new();
-    full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
-    full_message.extend_from_slice(&message);
-
-    stream.write_all(&full_message)?;
-
-    // Read response
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf)?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-
-    let mut response = vec![0u8; len];
-    stream.read_exact(&mut response)?;
-
-    if response[0] == rssh_proto::messages::SSH_AGENT_SUCCESS {
-        // Parse the CBOR response to check if it's actually successful
-        let mut offset = 1;
-        if response.len() < offset + 4 {
-            return Err("Response too short".into());
-        }
-
-        let data_len = u32::from_be_bytes([
-            response[offset],
-            response[offset + 1],
-            response[offset + 2],
-            response[offset + 3],
-        ]) as usize;
-        offset += 4;
-
-        if response.len() < offset + data_len {
-            return Err("Response data truncated".into());
-        }
-
-        let cbor_data = &response[offset..offset + data_len];
-        let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
-
-        if !cbor_response.success {
-            // Parse the actual response data for error message
-            let response_data: serde_json::Value = ciborium::from_reader(&cbor_response.data[..])?;
-            if let Some(error) = response_data.get("error").and_then(|e| e.as_str()) {
-                return Err(error.into());
-            }
-            return Err("Change password operation failed".into());
-        }
-
-        Ok(())
-    } else {
-        Err("Failed to change master password".into())
-    }
-}
 
 fn update_certificate(
     socket_path: Option<&String>,
