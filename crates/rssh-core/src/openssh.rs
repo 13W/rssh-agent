@@ -1,5 +1,5 @@
 use crate::{Error, Result};
-use rand08::rngs::OsRng;
+use ssh_key::rand_core::OsRng;
 use ssh_key::{
     Algorithm, LineEnding,
     private::{Ed25519Keypair, KeypairData, PrivateKey, RsaKeypair},
