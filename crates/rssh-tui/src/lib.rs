@@ -239,9 +239,9 @@ impl Default for App {
 
 impl App {
     pub fn new() -> Self {
-        let mut list_state = ListState::default();
-        list_state.select(Some(0));
-
+        let list_state = ListState::default();
+        // Don't select anything initially - let load_keys handle it
+        
         Self {
             keys: Vec::new(),
             list_state,
@@ -1662,10 +1662,13 @@ fn load_keys(
 
             app.keys = keys;
 
-            // Update selection
-            if !app.keys.is_empty() && app.list_state.selected().is_none() {
+            // Update selection - ensure first key is selected if keys exist
+            if !app.keys.is_empty() {
                 app.list_state.select(Some(0));
                 app.selected_key = Some(0);
+            } else {
+                app.list_state.select(None);
+                app.selected_key = None;
             }
         } else {
             return Err(format!(
