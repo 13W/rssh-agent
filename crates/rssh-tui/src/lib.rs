@@ -1705,22 +1705,29 @@ fn lock_agent(socket_path: Option<&String>) -> Result<(), Box<dyn std::error::Er
 
     let mut stream = UnixStream::connect(&socket)?;
 
-    // Send lock message
-    let message = vec![
-        0,
-        0,
-        0,
-        1, // Length
-        rssh_proto::messages::SSH_AGENTC_LOCK,
-    ];
+    // Build proper LOCK message with empty passphrase string
+    let mut message = Vec::new();
+    message.push(rssh_proto::messages::SSH_AGENTC_LOCK);
+    
+    // Add empty passphrase string (4 bytes length + 0 bytes data)
+    message.extend_from_slice(&[0, 0, 0, 0]);
+    
+    // Add length prefix for the whole message
+    let mut full_message = Vec::new();
+    full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    full_message.extend_from_slice(&message);
 
-    stream.write_all(&message)?;
+    stream.write_all(&full_message)?;
 
     // Read response
-    let mut response = [0u8; 5];
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut response = vec![0u8; len];
     stream.read_exact(&mut response)?;
 
-    if response[4] != rssh_proto::messages::SSH_AGENT_SUCCESS {
+    if response[0] != rssh_proto::messages::SSH_AGENT_SUCCESS {
         return Err("Failed to lock agent".into());
     }
 
