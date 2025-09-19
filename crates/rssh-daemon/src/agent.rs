@@ -222,35 +222,63 @@ impl Agent {
         hasher.update(&request.key_blob);
         let fingerprint = hex::encode(hasher.finalize());
 
-        // Create confirmation function that uses D-Bus notifications
+        // Create a confirmation function that uses D-Bus notifications
+        // Use std::sync channels to bridge async and sync
         let dbus_notifications = self.dbus_notifications.clone();
+        
         let confirm_fn = Box::new(
-            move |fingerprint: &str, description: &str, key_type: &str| -> Result<bool> {
-                // Use tokio runtime to run async code in sync context
-                let rt = tokio::runtime::Handle::current();
+            move |fp: &str, desc: &str, kt: &str| -> Result<bool> {
+                let fingerprint = fp.to_string();
+                let description = desc.to_string();
+                let key_type = kt.to_string();
                 
-                rt.block_on(async {
-                    if dbus_notifications.is_available() {
-                        // Use D-Bus notifications for approval with 30 second timeout
-                        dbus_notifications
-                            .request_key_approval(fingerprint, description, key_type, 30)
+                // Use std::sync::mpsc for sync/async communication
+                let (tx, rx) = std::sync::mpsc::channel();
+                let dbus_notifications_clone = dbus_notifications.clone();
+                
+                // Spawn task to handle async D-Bus call
+                tokio::spawn(async move {
+                    let result = if dbus_notifications_clone.is_available() {
+                        match dbus_notifications_clone
+                            .request_key_approval(&fingerprint, &description, &key_type, 30)
                             .await
+                        {
+                            Ok(approval) => approval,
+                            Err(e) => {
+                                tracing::error!("D-Bus notification failed: {}", e);
+                                false // Deny on error
+                            }
+                        }
                     } else {
                         // Fallback to the original prompt system if D-Bus is not available
-                        let prompter = crate::prompt::PrompterDecision::choose().ok_or_else(|| {
-                            rssh_core::Error::Internal("No prompt method available".into())
-                        })?;
+                        match crate::prompt::PrompterDecision::choose() {
+                            Some(prompter) => {
+                                let prompt_text = format!(
+                                    "Allow use of {} key '{}' ({}...)?\n\n[D-Bus notifications unavailable - using fallback prompt]",
+                                    key_type,
+                                    description,
+                                    &fingerprint[..12]
+                                );
+                                prompter.confirm(&prompt_text).unwrap_or(false)
+                            }
+                            None => {
+                                tracing::warn!("No prompt method available, denying key usage");
+                                false
+                            }
+                        }
+                    };
+                    
+                    let _ = tx.send(result);
+                });
 
-                        let prompt_text = format!(
-                            "Allow use of {} key '{}' ({})?\n\n[D-Bus notifications unavailable - using fallback prompt]",
-                            key_type,
-                            description,
-                            &fingerprint[..12]
-                        );
-
-                        prompter.confirm(&prompt_text)
+                // Wait for the result with timeout to avoid hanging
+                match rx.recv_timeout(std::time::Duration::from_secs(35)) {
+                    Ok(result) => Ok(result),
+                    Err(_) => {
+                        tracing::error!("Confirmation timeout or error, denying access");
+                        Ok(false)
                     }
-                })
+                }
             },
         );
 
