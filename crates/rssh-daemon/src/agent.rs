@@ -959,6 +959,43 @@ impl Agent {
                     }
                 }
             }
+            "manage.set_default_constraints" => {
+                tracing::debug!("Handling manage.set_default_constraints extension");
+
+                // Get master password
+                let master_password = {
+                    let master_password_guard = self.master_password.read().await;
+                    master_password_guard.clone()
+                };
+
+                let master_password = match master_password {
+                    Some(pwd) => pwd,
+                    None => {
+                        tracing::error!(
+                            "Master password not available for manage.set_default_constraints"
+                        );
+                        return Ok(messages::build_failure());
+                    }
+                };
+
+                match extensions::handle_manage_set_default_constraints(
+                    &request.data,
+                    self.storage_dir.as_deref(),
+                    &master_password,
+                ) {
+                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                    Err(e) => {
+                        tracing::error!("Failed to handle manage.set_default_constraints: {}", e);
+                        // Check if we should return a specific error response
+                        match extensions::build_error_response(e) {
+                            Ok(error_response) => {
+                                Ok(extensions::build_extension_response(error_response))
+                            }
+                            Err(_) => Ok(messages::build_failure()),
+                        }
+                    }
+                }
+            }
             _ => {
                 // Handle unknown extensions gracefully
                 tracing::info!("Received unknown extension: {}", request.extension);

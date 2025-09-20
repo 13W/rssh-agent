@@ -118,7 +118,7 @@ mod integration_tests {
         // Create and start the agent
         use rssh_core::config::Config;
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_12345").unwrap();
-        let agent = Arc::new(Agent::new(config));
+        let agent = Arc::new(Agent::new(config).await);
         let shutdown_signal = Arc::new(tokio::sync::Notify::new());
         let server = SocketServer::new(socket_path.clone(), agent.clone(), shutdown_signal);
 

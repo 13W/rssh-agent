@@ -1,11 +1,11 @@
 use crate::{Error, Result};
 use argon2::{Argon2, Params, Version};
 
+use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, OsRng},
 };
-use chacha20poly1305::aead::rand_core::RngCore;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -493,6 +493,35 @@ impl RamStore {
         has_cert: bool,
     ) -> Result<()> {
         self.load_key_internal(fingerprint, key_data, description, key_type, has_cert, true)
+    }
+
+    /// Load a key into RAM with default constraints applied
+    pub fn load_key_with_defaults(
+        &self,
+        fingerprint: &str,
+        key_data: &[u8],
+        description: String,
+        key_type: String,
+        has_cert: bool,
+        default_confirm: bool,
+        default_lifetime_seconds: Option<u64>,
+    ) -> Result<()> {
+        // First load the key normally
+        self.load_key_internal(
+            fingerprint,
+            key_data,
+            description,
+            key_type,
+            has_cert,
+            false, // is_external = false for keys from disk
+        )?;
+
+        // Apply default constraints if any are specified
+        if default_confirm || default_lifetime_seconds.is_some() {
+            self.set_constraints(fingerprint, default_confirm, default_lifetime_seconds)?;
+        }
+
+        Ok(())
     }
 
     /// Internal method to load a key with external flag

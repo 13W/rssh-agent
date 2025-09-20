@@ -1,12 +1,12 @@
 use crate::{Error, Result, fs_policy};
 use argon2::{Argon2, Params, Version};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, OsRng},
 };
 use chrono::{DateTime, Utc};
-use chacha20poly1305::aead::rand_core::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -48,6 +48,12 @@ pub struct KeyPayload {
     /// Indicates if the key data in secret_openssh_b64 is password-protected
     #[serde(default)]
     pub password_protected: bool,
+    /// Default confirmation requirement for this key
+    #[serde(default)]
+    pub default_confirm: bool,
+    /// Default lifetime in seconds for this key when loaded
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_lifetime_seconds: Option<u64>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
 }
@@ -62,6 +68,12 @@ pub struct KeyMetadata {
     /// Indicates if the key requires a password to decrypt
     #[serde(default)]
     pub password_protected: bool,
+    /// Default confirmation requirement for this key
+    #[serde(default)]
+    pub default_confirm: bool,
+    /// Default lifetime in seconds for this key when loaded
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_lifetime_seconds: Option<u64>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
 }
@@ -86,6 +98,31 @@ impl KeyFile {
         cert_openssh_b64: Option<String>,
         master_password: &str,
         key_password: Option<&str>,
+    ) -> Result<()> {
+        Self::write_with_key_password_and_defaults(
+            storage_dir,
+            fingerprint_hex,
+            ssh_key,
+            description,
+            cert_openssh_b64,
+            master_password,
+            key_password,
+            false, // default_confirm
+            None,  // default_lifetime_seconds
+        )
+    }
+
+    /// Write a key file to disk with optional key password protection and default constraints
+    pub fn write_with_key_password_and_defaults<P: AsRef<Path>>(
+        storage_dir: P,
+        fingerprint_hex: &str,
+        ssh_key: &crate::openssh::SshPrivateKey,
+        description: String,
+        cert_openssh_b64: Option<String>,
+        master_password: &str,
+        key_password: Option<&str>,
+        default_confirm: bool,
+        default_lifetime_seconds: Option<u64>,
     ) -> Result<()> {
         validate_fingerprint_format(fingerprint_hex)?;
         validate_description(&description)?;
@@ -119,6 +156,8 @@ impl KeyFile {
             secret_openssh_b64,
             cert_openssh_b64,
             password_protected,
+            default_confirm,
+            default_lifetime_seconds,
             created: now,
             updated: now,
         };
@@ -497,9 +536,31 @@ impl KeyFile {
             description: payload.description,
             has_cert: payload.cert_openssh_b64.is_some(),
             password_protected: payload.password_protected,
+            default_confirm: payload.default_confirm,
+            default_lifetime_seconds: payload.default_lifetime_seconds,
             created: payload.created,
             updated: payload.updated,
         })
+    }
+
+    /// Update default constraints for an existing key file
+    pub fn update_default_constraints<P: AsRef<Path>>(
+        storage_dir: P,
+        fingerprint_hex: &str,
+        master_password: &str,
+        default_confirm: bool,
+        default_lifetime_seconds: Option<u64>,
+    ) -> Result<()> {
+        // Read the current payload
+        let mut payload = Self::read(storage_dir.as_ref(), fingerprint_hex, master_password)?;
+
+        // Update the constraint fields and timestamp
+        payload.default_confirm = default_confirm;
+        payload.default_lifetime_seconds = default_lifetime_seconds;
+        payload.updated = Utc::now();
+
+        // Write the updated payload back to disk
+        Self::write_payload(storage_dir, fingerprint_hex, &payload, master_password)
     }
 }
 
@@ -748,6 +809,8 @@ mod tests {
             secret_openssh_b64: BASE64.encode(&wire_key_data),
             cert_openssh_b64: None,
             password_protected: false,
+            default_confirm: false,
+            default_lifetime_seconds: None,
             created: Utc::now(),
             updated: Utc::now(),
         };
@@ -838,6 +901,8 @@ mod tests {
             secret_openssh_b64: BASE64.encode(&wire_key_data),
             cert_openssh_b64: Some(BASE64.encode(b"fake cert")),
             password_protected: false,
+            default_confirm: false,
+            default_lifetime_seconds: None,
             created: Utc::now(),
             updated: Utc::now(),
         };

@@ -26,6 +26,9 @@ pub struct ManagedKey {
     pub has_cert: bool,
     pub password_protected: bool, // Whether key on disk is password-protected
     pub constraints: serde_json::Value, // Object with confirm and lifetime_expires_at
+    /// Default constraints for this key (only present for disk-stored keys)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_constraints: Option<serde_json::Value>, // Object with default_confirm and default_lifetime_seconds
     pub created: Option<String>,
     pub updated: Option<String>,
 }
@@ -124,4 +127,27 @@ pub struct ManageSetPasswordResponse {
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<String>,
+}
+
+/// Request for manage.set_default_constraints operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManageSetDefaultConstraintsRequest {
+    pub fp_sha256_hex: String,
+    pub default_confirm: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_lifetime_seconds: Option<u64>,
+}
+
+/// Response for manage.set_default_constraints operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManageSetDefaultConstraintsResponse {
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_confirm: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_lifetime_seconds: Option<u64>,
 }

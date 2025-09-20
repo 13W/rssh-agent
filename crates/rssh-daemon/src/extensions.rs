@@ -1,8 +1,8 @@
 use rssh_core::{Error, Result, ram_store::KeyInfo};
 use serde::Deserialize;
+use ssh_key::rand_core::OsRng;
 use std::collections::HashSet;
 use std::fs;
-use ssh_key::rand_core::OsRng;
 
 pub const EXTENSION_NAMESPACE: &str = "rssh-agent@local";
 
@@ -144,19 +144,25 @@ pub fn handle_manage_list(
                 }),
             });
 
-            // For loaded keys that exist on disk, check if they were originally password-protected
-            let originally_password_protected = if key_on_disk {
+            // For loaded keys that exist on disk, check metadata for password protection and default constraints
+            let (originally_password_protected, default_constraints) = if key_on_disk {
                 if let (Some(dir), Some(master_pwd)) = (storage_dir, master_password) {
-                    // Try to read metadata to check if key was originally password-protected
+                    // Try to read metadata to check if key was originally password-protected and get default constraints
                     match KeyFile::read_metadata(dir, &key.fingerprint, master_pwd) {
-                        Ok(metadata) => metadata.password_protected,
-                        Err(_) => false, // If we can't read metadata, assume not protected
+                        Ok(metadata) => {
+                            let defaults = Some(serde_json::json!({
+                                "default_confirm": metadata.default_confirm,
+                                "default_lifetime_seconds": metadata.default_lifetime_seconds,
+                            }));
+                            (metadata.password_protected, defaults)
+                        },
+                        Err(_) => (false, None), // If we can't read metadata, assume not protected and no defaults
                     }
                 } else {
-                    false // No master password available, can't determine
+                    (false, None) // No master password available, can't determine
                 }
             } else {
-                false // External keys are not password-protected
+                (false, None) // External keys are not password-protected and have no defaults
             };
 
             ManagedKey {
@@ -170,6 +176,7 @@ pub fn handle_manage_list(
                 has_cert: key.has_cert,
                 password_protected: originally_password_protected,  // Check if originally protected
                 constraints,
+                default_constraints,
                 created: Some(key.created.to_rfc3339()),  // Use actual creation time
                 updated: key.updated.map(|t| t.to_rfc3339()),  // Use actual update time
             }
@@ -214,6 +221,10 @@ pub fn handle_manage_list(
                             "confirm": false,
                             "lifetime_expires_at": null,
                         }),
+                        default_constraints: Some(serde_json::json!({
+                            "default_confirm": metadata.default_confirm,
+                            "default_lifetime_seconds": metadata.default_lifetime_seconds,
+                        })),
                         created: Some(metadata.created.to_rfc3339()),
                         updated: Some(metadata.updated.to_rfc3339()),
                     });
@@ -236,6 +247,7 @@ pub fn handle_manage_list(
                             "confirm": false,
                             "lifetime_expires_at": null,
                         }),
+                        default_constraints: None, // Can't determine without decrypting
                         created: None,
                         updated: None,
                     });
@@ -257,6 +269,7 @@ pub fn handle_manage_list(
                     "confirm": false,
                     "lifetime_expires_at": null,
                 }),
+                default_constraints: None, // Can't determine without master password
                 created: None,
                 updated: None,
             });
@@ -637,6 +650,8 @@ pub async fn handle_manage_import(
         secret_openssh_b64,
         cert_openssh_b64,
         password_protected,
+        default_confirm: false,
+        default_lifetime_seconds: None,
         created: now,
         updated: now,
     };
@@ -865,6 +880,8 @@ pub async fn handle_manage_import_direct(data: &[u8], master_password: &str) -> 
         secret_openssh_b64,
         cert_openssh_b64: None,
         password_protected,
+        default_confirm: false,
+        default_lifetime_seconds: None,
         created: now,
         updated: now,
     };
@@ -942,7 +959,7 @@ pub async fn handle_manage_load(
                 .map_err(|e| Error::Config(format!("Invalid base64 key password: {}", e)))?;
             let pass_string = std::str::from_utf8(&pass_bytes)
                 .map_err(|e| Error::Config(format!("Invalid UTF-8 key password: {}", e)))?
-                .to_string(); // Convert to owned String
+                .to_string();
             Some(pass_string)
         } else {
             return Err(Error::NeedKeyPassword);
@@ -968,43 +985,39 @@ pub async fn handle_manage_load(
             .map_err(|e| Error::Internal(format!("Failed to decode key data: {}", e)))?
     };
 
-    // Load the key into RAM store
-    // Use load_key (not load_external_key) since this is an internal key from disk
     // Convert KeyType enum to string
     let key_type_str = match metadata.key_type {
         rssh_core::keyfile::KeyType::Ed25519 => "ed25519".to_string(),
         rssh_core::keyfile::KeyType::Rsa => "rsa".to_string(),
     };
 
-    ram_store.load_key(
+    // Determine final constraints using precedence:
+    // 1. Explicit request parameters (highest priority)
+    // 2. Stored default constraints from keyfile metadata
+    // 3. System defaults (false/None) (lowest priority)
+    let final_confirm = request.confirm.unwrap_or(metadata.default_confirm);
+    let final_lifetime_secs = request
+        .lifetime_seconds
+        .map(|secs| secs as u64)
+        .or(metadata.default_lifetime_seconds);
+
+    // Load the key into RAM using new method with default constraints
+    ram_store.load_key_with_defaults(
         &request.fp_sha256_hex,
         &wire_key_data,
         metadata.description,
         key_type_str,
         metadata.has_cert,
+        final_confirm,
+        final_lifetime_secs,
     )?;
 
-    // Apply constraints if specified
-    let confirm = request.confirm.unwrap_or(false);
-    let lifetime_secs = request.lifetime_seconds.map(|secs| secs as u64);
-
-    if confirm || lifetime_secs.is_some() {
-        if let Err(e) = ram_store.set_constraints(&request.fp_sha256_hex, confirm, lifetime_secs) {
-            tracing::warn!(
-                "Failed to set constraints for loaded key {}: {}",
-                request.fp_sha256_hex,
-                e
-            );
-            // Key was loaded successfully, but constraints failed - this is not fatal
-        } else {
-            tracing::debug!(
-                "Set constraints for loaded key {}: confirm={}, lifetime={:?}",
-                request.fp_sha256_hex,
-                confirm,
-                lifetime_secs
-            );
-        }
-    }
+    tracing::debug!(
+        "Loaded key {} with constraints: confirm={}, lifetime={:?}",
+        &request.fp_sha256_hex[..12],
+        final_confirm,
+        final_lifetime_secs
+    );
 
     // Create success response
     let response_data = serde_json::json!({
@@ -1216,6 +1229,81 @@ pub fn handle_manage_set_desc(
         "ok": true,
         "fp_sha256_hex": request.fp_sha256_hex,
         "description": request.description
+    });
+
+    // Convert to CBOR bytes for the data field
+    let mut data_cbor = Vec::new();
+    ciborium::into_writer(&response_data, &mut data_cbor)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    // Create the ExtensionResponse
+    let response = rssh_proto::cbor::ExtensionResponse {
+        success: true,
+        data: data_cbor,
+    };
+
+    // Serialize the whole response to CBOR
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&response, &mut cbor_data)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    Ok(cbor_data)
+}
+
+/// Handle manage.set_default_constraints extension - sets default constraints for a key
+pub fn handle_manage_set_default_constraints(
+    data: &[u8],
+    storage_dir: Option<&str>,
+    master_password: &str,
+) -> Result<Vec<u8>> {
+    use rssh_core::keyfile::KeyFile;
+
+    #[derive(Debug, Deserialize)]
+    struct SetDefaultConstraintsRequest {
+        fp_sha256_hex: String,
+        default_confirm: bool,
+        default_lifetime_seconds: Option<u64>,
+    }
+
+    // Parse the CBOR request data
+    let request: SetDefaultConstraintsRequest = ciborium::from_reader(data).map_err(|e| {
+        Error::Internal(format!(
+            "Failed to parse set_default_constraints request: {}",
+            e
+        ))
+    })?;
+
+    // Get storage directory
+    let storage_dir = storage_dir
+        .ok_or_else(|| Error::Internal("Storage directory not configured".to_string()))?;
+
+    // Update the key file with new default constraints
+    KeyFile::update_default_constraints(
+        storage_dir,
+        &request.fp_sha256_hex,
+        master_password,
+        request.default_confirm,
+        request.default_lifetime_seconds,
+    )
+    .map_err(|e| match e {
+        Error::NotFound => Error::NotFound,
+        Error::WrongPassword => Error::WrongPassword,
+        _ => Error::Internal(format!("Failed to update default constraints: {}", e)),
+    })?;
+
+    tracing::debug!(
+        "Updated default constraints for key {}: confirm={}, lifetime={:?}",
+        &request.fp_sha256_hex[..12],
+        request.default_confirm,
+        request.default_lifetime_seconds
+    );
+
+    // Create success response
+    let response_data = serde_json::json!({
+        "ok": true,
+        "fp_sha256_hex": request.fp_sha256_hex,
+        "default_confirm": request.default_confirm,
+        "default_lifetime_seconds": request.default_lifetime_seconds
     });
 
     // Convert to CBOR bytes for the data field
@@ -1700,6 +1788,8 @@ pub async fn handle_manage_create(
         secret_openssh_b64,
         cert_openssh_b64: None,
         password_protected: false, // New keys created via manage.create are not password-protected
+        default_confirm: false,
+        default_lifetime_seconds: None,
         created: now,
         updated: now,
     };

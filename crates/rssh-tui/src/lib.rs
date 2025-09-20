@@ -29,6 +29,8 @@ pub struct KeyInfo {
     pub has_cert: bool,
     pub password_protected: bool, // Whether key on disk is password-protected
     pub constraints: serde_json::Value,
+    /// Default constraints for this key (only present for disk-stored keys)
+    pub default_constraints: Option<serde_json::Value>, // Object with default_confirm and default_lifetime_seconds
     pub created: Option<String>,
     pub updated: Option<String>,
 }
@@ -55,6 +57,10 @@ pub struct App {
     pub key_password_buffer: String, // For setting key passwords
     pub key_being_protected: Option<String>, // Fingerprint of key being password-protected
     pub import_with_password: bool,  // Whether to set password during import
+    // Default constraints management state
+    pub default_constraint_confirm: bool, // For editing default constraints
+    pub default_constraint_lifetime: Option<String>, // User-friendly format for default constraints
+    pub key_setting_defaults: Option<String>, // Fingerprint of key having defaults set
 }
 
 // Constraint helper functions
@@ -206,8 +212,10 @@ pub enum ConstraintStep {
 
 #[derive(PartialEq, Clone)]
 pub enum ConstraintContext {
+    None,
     Load(String), // fingerprint
     Create,
+    SetDefaults(String), // fingerprint for setting default constraints
 }
 
 #[derive(PartialEq)]
@@ -229,6 +237,8 @@ pub enum InputMode {
     RemoveKeyPassword,
     ImportKeyPassword,
     ImportKeyPasswordConfirm,
+    DefaultConstraints,
+    DefaultLifetimeInput,
 }
 
 impl Default for App {
@@ -241,7 +251,7 @@ impl App {
     pub fn new() -> Self {
         let list_state = ListState::default();
         // Don't select anything initially - let load_keys handle it
-        
+
         Self {
             keys: Vec::new(),
             list_state,
@@ -262,6 +272,9 @@ impl App {
             key_password_buffer: String::new(),
             key_being_protected: None,
             import_with_password: false,
+            default_constraint_confirm: false,
+            default_constraint_lifetime: None,
+            key_setting_defaults: None,
         }
     }
 
@@ -418,14 +431,34 @@ fn run_app<B: Backend>(
                             let is_loaded = app.keys[idx].loaded;
                             let password_protected = app.keys[idx].password_protected;
                             let fingerprint = app.keys[idx].fingerprint.clone();
+                            let has_default_constraints =
+                                app.keys[idx].default_constraints.is_some();
 
                             // Check if key is on disk but not loaded
                             if !has_disk {
                                 app.set_status("Key is not on disk".to_string());
                             } else if is_loaded {
                                 app.set_status("Key is already loaded".to_string());
+                            } else if has_default_constraints {
+                                // Key has default constraints - load automatically without prompting
+                                if password_protected {
+                                    // Need password first, but will auto-apply defaults after
+                                    app.reset_constraints();
+                                    app.constraint_context = ConstraintContext::None; // No constraint prompt
+                                    app.input_mode = InputMode::KeyPassword;
+                                    app.input_buffer.clear();
+                                    app.key_being_loaded = Some(fingerprint);
+                                    app.set_status(
+                                        "Key is password-protected. Enter password (will use default constraints):".to_string(),
+                                    );
+                                } else {
+                                    // Load immediately with default constraints
+                                    let result =
+                                        load_disk_key(socket_path.as_ref(), &fingerprint, None);
+                                    handle_load_result(app, socket_path.as_ref(), result);
+                                }
                             } else if password_protected {
-                                // Key is password-protected, prompt for password immediately
+                                // Key is password-protected, prompt for password then constraints
                                 app.reset_constraints();
                                 app.constraint_context =
                                     ConstraintContext::Load(fingerprint.clone());
@@ -436,7 +469,7 @@ fn run_app<B: Backend>(
                                     "Key is password-protected. Enter password:".to_string(),
                                 );
                             } else {
-                                // Key is not password-protected, enter constraint dialog
+                                // Key is not password-protected and has no defaults, enter constraint dialog
                                 app.reset_constraints();
                                 app.constraint_context = ConstraintContext::Load(fingerprint);
                                 app.input_mode = InputMode::ConstraintsLoad;
@@ -578,6 +611,55 @@ fn run_app<B: Backend>(
                             }
                         }
                     }
+                    KeyCode::Char('D') => {
+                        // Set default constraints for selected key
+                        if let Some(idx) = app.selected_key
+                            && idx < app.keys.len()
+                        {
+                            let key = &app.keys[idx];
+                            if !key.has_disk {
+                                app.set_status(
+                                    "Only stored keys can have default constraints set".to_string(),
+                                );
+                            } else {
+                                // Initialize default constraint state from existing defaults if any
+                                if let Some(default_constraints) = &key.default_constraints {
+                                    app.default_constraint_confirm = default_constraints
+                                        .get("default_confirm")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
+                                    if let Some(default_lifetime_seconds) = default_constraints
+                                        .get("default_lifetime_seconds")
+                                        .and_then(|v| v.as_u64())
+                                    {
+                                        app.default_constraint_lifetime =
+                                            Some(format_lifetime_friendly(
+                                                default_lifetime_seconds as u32,
+                                            ));
+                                    } else {
+                                        app.default_constraint_lifetime = None;
+                                    }
+                                } else {
+                                    app.default_constraint_confirm = false;
+                                    app.default_constraint_lifetime = None;
+                                }
+
+                                app.input_mode = InputMode::DefaultConstraints;
+                                app.constraint_context =
+                                    ConstraintContext::SetDefaults(key.fingerprint.clone());
+                                app.key_setting_defaults = Some(key.fingerprint.clone());
+                                let confirm_status = if app.default_constraint_confirm {
+                                    "ON"
+                                } else {
+                                    "OFF"
+                                };
+                                app.set_status(format!(
+                                    "Default Confirm: {} | (c)onfirm, (l)ifetime, (Enter) to save, (Esc) to cancel",
+                                    confirm_status
+                                ));
+                            }
+                        }
+                    }
                     KeyCode::Esc => {
                         app.show_help = false;
                     }
@@ -685,6 +767,11 @@ fn run_app<B: Backend>(
 
                                 // Return to constraint selection
                                 match app.constraint_context {
+                                    ConstraintContext::None => {
+                                        // No constraint configuration - return to main view
+                                        app.input_mode = InputMode::Normal;
+                                        app.set_status("Ready".to_string());
+                                    }
                                     ConstraintContext::Load(_) => {
                                         app.input_mode = InputMode::ConstraintsLoad;
                                         app.constraint_step = ConstraintStep::SelectOptions;
@@ -703,6 +790,24 @@ fn run_app<B: Backend>(
                                             if app.constraint_confirm { "ON" } else { "OFF" };
                                         app.set_status(format!("Confirm: {}, Lifetime: {} | (c)onfirm, (l)ifetime, (Enter) to continue, (s)kip", confirm_status, lifetime_display));
                                     }
+                                    ConstraintContext::SetDefaults(_) => {
+                                        // This case should not occur in LifetimeInput mode for regular constraints
+                                        // but we need to handle it for completeness
+                                        app.input_mode = InputMode::DefaultConstraints;
+                                        let confirm_status = if app.default_constraint_confirm {
+                                            "ON"
+                                        } else {
+                                            "OFF"
+                                        };
+                                        let lifetime_display = app
+                                            .default_constraint_lifetime
+                                            .as_deref()
+                                            .unwrap_or("None");
+                                        app.set_status(format!(
+                                            "Default Confirm: {}, Lifetime: {} | (c)onfirm, (l)ifetime, (Enter) to save, (Esc) to cancel",
+                                            confirm_status, lifetime_display
+                                        ));
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -713,11 +818,18 @@ fn run_app<B: Backend>(
                     KeyCode::Esc => {
                         app.input_buffer.clear();
                         match app.constraint_context {
+                            ConstraintContext::None => {
+                                // No constraint configuration - return to main view
+                                app.input_mode = InputMode::Normal;
+                            }
                             ConstraintContext::Load(_) => {
                                 app.input_mode = InputMode::ConstraintsLoad;
                             }
                             ConstraintContext::Create => {
                                 app.input_mode = InputMode::ConstraintsCreate;
+                            }
+                            ConstraintContext::SetDefaults(_) => {
+                                app.input_mode = InputMode::DefaultConstraints;
                             }
                         }
                         app.constraint_step = ConstraintStep::SelectOptions;
@@ -771,7 +883,7 @@ fn run_app<B: Backend>(
                                     app.constraint_step = ConstraintStep::SelectOptions;
                                     app.set_status("Constraints | (c)onfirm, (l)ifetime, (Enter) to load, (s)kip".to_string());
                                 } else {
-                                    // Load immediately if no constraints context
+                                    // Load immediately if no constraints context (using default constraints)
                                     let result = load_disk_key(
                                         socket_path.as_ref(),
                                         fingerprint,
@@ -1267,6 +1379,119 @@ fn run_app<B: Backend>(
                     }
                     _ => {}
                 },
+                InputMode::DefaultConstraints => {
+                    match key.code {
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            app.default_constraint_confirm = !app.default_constraint_confirm;
+                            let confirm_status = if app.default_constraint_confirm {
+                                "ON"
+                            } else {
+                                "OFF"
+                            };
+                            app.set_status(format!(
+                            "Default Confirm: {} | (c)onfirm, (l)ifetime, (Enter) to save, (Esc) to cancel",
+                            confirm_status
+                        ));
+                        }
+                        KeyCode::Char('l') | KeyCode::Char('L') => {
+                            app.input_mode = InputMode::DefaultLifetimeInput;
+                            app.input_buffer.clear();
+                            app.set_status("Enter default lifetime (e.g. 2h, 30m, 1d) or leave empty for none:".to_string());
+                        }
+                        KeyCode::Enter => {
+                            // Save default constraints
+                            if let Some(fingerprint) = &app.key_setting_defaults.clone() {
+                                match set_default_constraints(
+                                    socket_path.as_ref(),
+                                    fingerprint,
+                                    app.default_constraint_confirm,
+                                    app.default_constraint_lifetime.as_deref(),
+                                ) {
+                                    Ok(()) => {
+                                        app.set_status(
+                                            "Default constraints saved successfully".to_string(),
+                                        );
+                                        if let Err(e) = load_keys(app, socket_path.as_ref()) {
+                                            app.set_status(format!("Failed to refresh: {}", e));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app.set_status(format!(
+                                            "Failed to save default constraints: {}",
+                                            e
+                                        ));
+                                    }
+                                }
+                            }
+                            app.input_mode = InputMode::Normal;
+                            app.key_setting_defaults = None;
+                            app.default_constraint_confirm = false;
+                            app.default_constraint_lifetime = None;
+                        }
+                        KeyCode::Esc => {
+                            app.input_mode = InputMode::Normal;
+                            app.key_setting_defaults = None;
+                            app.default_constraint_confirm = false;
+                            app.default_constraint_lifetime = None;
+                            app.clear_status();
+                        }
+                        _ => {}
+                    }
+                }
+                InputMode::DefaultLifetimeInput => match key.code {
+                    KeyCode::Enter => {
+                        if app.input_buffer.is_empty() {
+                            // Empty means no default lifetime
+                            app.default_constraint_lifetime = None;
+                        } else {
+                            match parse_lifetime(&app.input_buffer) {
+                                Ok(_) => {
+                                    app.default_constraint_lifetime =
+                                        Some(app.input_buffer.clone());
+                                }
+                                Err(e) => {
+                                    app.set_status(format!("Invalid lifetime format: {}", e));
+                                    return Ok(());
+                                }
+                            }
+                        }
+
+                        app.input_buffer.clear();
+                        app.input_mode = InputMode::DefaultConstraints;
+
+                        let confirm_status = if app.default_constraint_confirm {
+                            "ON"
+                        } else {
+                            "OFF"
+                        };
+                        let lifetime_display =
+                            app.default_constraint_lifetime.as_deref().unwrap_or("None");
+                        app.set_status(format!(
+                            "Default Confirm: {}, Lifetime: {} | (c)onfirm, (l)ifetime, (Enter) to save, (Esc) to cancel",
+                            confirm_status, lifetime_display
+                        ));
+                    }
+                    KeyCode::Esc => {
+                        app.input_buffer.clear();
+                        app.input_mode = InputMode::DefaultConstraints;
+                        let confirm_status = if app.default_constraint_confirm {
+                            "ON"
+                        } else {
+                            "OFF"
+                        };
+                        app.set_status(format!(
+                            "Default Confirm: {} | (c)onfirm, (l)ifetime, (Enter) to save, (Esc) to cancel",
+                            confirm_status
+                        ));
+                    }
+                    KeyCode::Char(c) => {
+                        app.input_buffer.push(c);
+                    }
+                    KeyCode::Backspace => {
+                        app.input_buffer.pop();
+                    }
+                    _ => {}
+                },
             }
         }
 
@@ -1368,6 +1593,10 @@ fn ui(f: &mut Frame, app: &App) {
                 Span::raw("      Remove password protection from key"),
             ]),
             Line::from(vec![
+                Span::styled("D", Style::default().fg(Color::Yellow)),
+                Span::raw("      Set default constraints for key"),
+            ]),
+            Line::from(vec![
                 Span::styled("d/Del", Style::default().fg(Color::Yellow)),
                 Span::raw("  Permanently delete key from disk"),
             ]),
@@ -1462,30 +1691,82 @@ fn ui(f: &mut Frame, app: &App) {
                     }
                 }
 
-                // Show lifetime counter if key has lifetime constraint
-                if let Some(remaining) = calculate_remaining_lifetime(&key.constraints) {
-                    let color = if remaining == "EXPIRED" {
-                        Color::Red
-                    } else if remaining.contains("s")
-                        && !remaining.contains("m")
-                        && !remaining.contains("h")
-                        && !remaining.contains("d")
-                    {
-                        Color::Yellow // Less than a minute
-                    } else {
-                        Color::Cyan
-                    };
-                    spans.push(Span::styled(
-                        format!(" [{}]", remaining),
-                        Style::default().fg(color),
-                    ));
-                }
+                // Show constraint display - unified logic for both runtime and default constraints
+                // Priority: Runtime constraints > Default constraints (never show both)
+                // Only consider runtime constraints as meaningful if they have active values
+                let has_runtime_constraints = key
+                    .constraints
+                    .as_object()
+                    .map(|obj| {
+                        // Check for meaningful runtime constraints:
+                        // - confirm is true
+                        // - lifetime_expires_at is not null
+                        let has_confirm = obj.get("confirm")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let has_lifetime = obj.get("lifetime_expires_at")
+                            .and_then(|v| v.as_str())
+                            .is_some();
+                        has_confirm || has_lifetime
+                    })
+                    .unwrap_or(false);
 
-                // Show constraints if any
-                if let Some(confirm) = key.constraints.get("confirm").and_then(|v| v.as_bool())
-                    && confirm
-                {
-                    spans.push(Span::styled(" [C]", Style::default().fg(Color::Red)));
+                if has_runtime_constraints {
+                    // Show runtime constraints with red color (explicit overrides)
+
+                    // Show lifetime counter if key has lifetime constraint
+                    if let Some(remaining) = calculate_remaining_lifetime(&key.constraints) {
+                        let color = if remaining == "EXPIRED" {
+                            Color::Red
+                        } else if remaining.contains("s")
+                            && !remaining.contains("m")
+                            && !remaining.contains("h")
+                            && !remaining.contains("d")
+                        {
+                            Color::Yellow // Less than a minute
+                        } else {
+                            Color::Cyan
+                        };
+                        spans.push(Span::styled(
+                            format!(" [{}]", remaining),
+                            Style::default().fg(color),
+                        ));
+                    }
+
+                    // Show confirm constraint
+                    if let Some(confirm) = key.constraints.get("confirm").and_then(|v| v.as_bool())
+                        && confirm
+                    {
+                        spans.push(Span::styled(" [C]", Style::default().fg(Color::Red)));
+                    }
+                } else if key.has_disk {
+                    // Show default constraints if no runtime constraints and key has disk storage
+                    if let Some(default_constraints) = &key.default_constraints {
+                        // Determine constraint color: Gray for unloaded keys, Blue for loaded keys
+                        let constraint_color = if key.loaded { Color::Blue } else { Color::Gray };
+
+                        // Show default lifetime in same format as runtime constraints
+                        if let Some(default_lifetime_seconds) = default_constraints
+                            .get("default_lifetime_seconds")
+                            .and_then(|v| v.as_u64())
+                        {
+                            let lifetime_display =
+                                format_lifetime_friendly(default_lifetime_seconds as u32);
+                            spans.push(Span::styled(
+                                format!(" [{}]", lifetime_display),
+                                Style::default().fg(constraint_color),
+                            ));
+                        }
+
+                        // Show default confirm constraint in same format
+                        if let Some(default_confirm) = default_constraints
+                            .get("default_confirm")
+                            .and_then(|v| v.as_bool())
+                            && default_confirm
+                        {
+                            spans.push(Span::styled(" [C]", Style::default().fg(constraint_color)));
+                        }
+                    }
                 }
 
                 ListItem::new(Line::from(spans))
@@ -1540,6 +1821,10 @@ fn ui(f: &mut Frame, app: &App) {
         format!("Bit length: {}", app.input_buffer)
     } else if app.input_mode == InputMode::CreateDescription {
         format!("Description: {}", app.input_buffer)
+    } else if app.input_mode == InputMode::DefaultConstraints {
+        "Setting default constraints...".to_string()
+    } else if app.input_mode == InputMode::DefaultLifetimeInput {
+        format!("Default lifetime: {}", app.input_buffer)
     } else {
         format!("Keys: {} | Press h for help | q to quit", app.keys.len())
     };
@@ -1652,6 +1937,7 @@ fn load_keys(
                     has_cert: k.has_cert,
                     password_protected: k.password_protected,
                     constraints: k.constraints,
+                    default_constraints: k.default_constraints,
                     created: k.created,
                     updated: k.updated,
                 })
@@ -1704,10 +1990,10 @@ fn lock_agent(socket_path: Option<&String>) -> Result<(), Box<dyn std::error::Er
     // Build proper LOCK message with empty passphrase string
     let mut message = Vec::new();
     message.push(rssh_proto::messages::SSH_AGENTC_LOCK);
-    
+
     // Add empty passphrase string (4 bytes length + 0 bytes data)
     message.extend_from_slice(&[0, 0, 0, 0]);
-    
+
     // Add length prefix for the whole message
     let mut full_message = Vec::new();
     full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
@@ -2221,7 +2507,6 @@ fn set_key_description(
     }
 }
 
-
 fn update_certificate(
     socket_path: Option<&String>,
     fingerprint: &str,
@@ -2676,6 +2961,8 @@ fn handle_load_result(
             app.set_status("Key loaded successfully".to_string());
             if let Err(e) = load_keys(app, socket_path) {
                 app.set_status(format!("Failed to refresh: {}", e));
+            } else {
+                app.set_status("Key loaded with default constraints".to_string());
             }
         }
         Err(e) => {
@@ -3014,4 +3301,120 @@ fn import_key_with_password(
     }
 
     Ok(())
+}
+
+fn set_default_constraints(
+    socket_path: Option<&String>,
+    fingerprint: &str,
+    default_confirm: bool,
+    default_lifetime: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let socket = socket_path
+        .cloned()
+        .or_else(|| std::env::var("SSH_AUTH_SOCK").ok())
+        .ok_or("No socket path available")?;
+
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(&socket)?;
+
+    // Build CBOR request for manage.set_default_constraints
+    use rssh_proto::cbor::ExtensionRequest;
+    let set_defaults_data = {
+        #[derive(serde::Serialize)]
+        struct SetDefaultConstraintsRequest {
+            fp_sha256_hex: String,
+            default_confirm: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            default_lifetime_seconds: Option<u64>,
+        }
+
+        let default_lifetime_seconds = if let Some(lifetime_str) = default_lifetime {
+            Some(parse_lifetime(lifetime_str)? as u64)
+        } else {
+            None
+        };
+
+        let req = SetDefaultConstraintsRequest {
+            fp_sha256_hex: fingerprint.to_string(),
+            default_confirm,
+            default_lifetime_seconds,
+        };
+
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&req, &mut cbor)?;
+        cbor
+    };
+
+    let request = ExtensionRequest {
+        extension: "manage.set_default_constraints".to_string(),
+        data: set_defaults_data,
+    };
+
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&request, &mut cbor_data)?;
+
+    // Build SSH protocol message with extension namespace
+    let mut message = Vec::new();
+    message.push(rssh_proto::messages::SSH_AGENTC_EXTENSION);
+
+    // Add extension namespace
+    let ext_namespace = b"rssh-agent@local";
+    message.extend_from_slice(&(ext_namespace.len() as u32).to_be_bytes());
+    message.extend_from_slice(ext_namespace);
+
+    // Add CBOR data
+    message.extend_from_slice(&cbor_data);
+
+    // Add length prefix for the whole message
+    let mut full_message = Vec::new();
+    full_message.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    full_message.extend_from_slice(&message);
+
+    stream.write_all(&full_message)?;
+
+    // Read response
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf)?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    let mut response = vec![0u8; len];
+    stream.read_exact(&mut response)?;
+
+    // Check response type
+    if response[0] == rssh_proto::messages::SSH_AGENT_SUCCESS {
+        // Parse the CBOR response to check if it's actually successful
+        let mut offset = 1;
+        if response.len() < offset + 4 {
+            return Err("Response too short".into());
+        }
+
+        let data_len = u32::from_be_bytes([
+            response[offset],
+            response[offset + 1],
+            response[offset + 2],
+            response[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if response.len() < offset + data_len {
+            return Err("Response data truncated".into());
+        }
+
+        let cbor_data = &response[offset..offset + data_len];
+        let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
+
+        if !cbor_response.success {
+            return Err(format!(
+                "Set default constraints failed: {}",
+                String::from_utf8_lossy(&cbor_response.data)
+            )
+            .into());
+        }
+
+        Ok(())
+    } else {
+        Err("Failed to set default constraints".into())
+    }
 }
