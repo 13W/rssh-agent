@@ -4,13 +4,14 @@
 //! for approval when SSH keys with confirmation constraints are used.
 
 use rssh_core::{Error, Result};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::timeout;
 use zbus::{Connection, Result as ZBusResult};
 
 /// D-Bus notification service for SSH key approval
 pub struct DbusNotificationService {
-    connection: Option<Connection>,
+    connection: Arc<Mutex<Option<Connection>>>,
 }
 
 impl DbusNotificationService {
@@ -28,7 +29,9 @@ impl DbusNotificationService {
             }
         };
 
-        Self { connection }
+        Self {
+            connection: Arc::new(Mutex::new(connection)),
+        }
     }
 
     /// Show a notification asking for SSH key usage approval
@@ -40,11 +43,14 @@ impl DbusNotificationService {
         key_type: &str,
         timeout_secs: u64,
     ) -> Result<bool> {
-        let connection = match &self.connection {
-            Some(conn) => conn,
-            None => {
-                tracing::warn!("D-Bus connection not available, denying key usage");
-                return Ok(false);
+        let connection = {
+            let conn_guard = self.connection.lock().unwrap();
+            match conn_guard.as_ref() {
+                Some(conn) => conn.clone(),
+                None => {
+                    tracing::warn!("D-Bus connection not available, denying key usage");
+                    return Ok(false);
+                }
             }
         };
 
@@ -59,7 +65,7 @@ impl DbusNotificationService {
         // Show notification with action buttons
         let notification_result = timeout(
             Duration::from_secs(timeout_secs),
-            self.show_approval_notification(connection, summary, &body),
+            self.show_approval_notification(&connection, summary, &body),
         )
         .await;
 
@@ -195,6 +201,79 @@ impl DbusNotificationService {
 
     /// Check if D-Bus notifications are available
     pub fn is_available(&self) -> bool {
-        self.connection.is_some()
+        let conn_guard = self.connection.lock().unwrap();
+        conn_guard.is_some()
+    }
+
+    /// Ensure D-Bus connection is healthy and reconnect if necessary
+    pub async fn ensure_connection(&self) -> Result<()> {
+        // Check if we have a connection first
+        let connection = {
+            let conn_guard = self.connection.lock().unwrap();
+            conn_guard.clone()
+        };
+
+        if connection.is_none() {
+            return self.reconnect().await;
+        }
+
+        // Test the connection by trying to get the D-Bus daemon properties
+        if let Some(connection) = connection {
+            // Try a simple D-Bus call to test connection health
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                connection.call_method(
+                    Some("org.freedesktop.DBus"),
+                    "/org/freedesktop/DBus",
+                    Some("org.freedesktop.DBus"),
+                    "GetId",
+                    &(),
+                ),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {
+                    tracing::debug!("D-Bus connection is healthy");
+                    Ok(())
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("D-Bus connection test failed: {}, attempting reconnect", e);
+                    self.reconnect().await
+                }
+                Err(_) => {
+                    tracing::warn!("D-Bus connection test timed out, attempting reconnect");
+                    self.reconnect().await
+                }
+            }
+        } else {
+            // No connection, try to reconnect
+            self.reconnect().await
+        }
+    }
+
+    /// Attempt to reconnect to D-Bus session bus
+    async fn reconnect(&self) -> Result<()> {
+        tracing::info!("Attempting to reconnect to D-Bus session bus");
+
+        match Connection::session().await {
+            Ok(new_conn) => {
+                tracing::info!("Successfully reconnected to D-Bus session bus");
+                // Update the connection with the new one
+                {
+                    let mut conn_guard = self.connection.lock().unwrap();
+                    *conn_guard = Some(new_conn);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Failed to reconnect to D-Bus session bus: {}", e);
+                // Clear the connection on failure
+                {
+                    let mut conn_guard = self.connection.lock().unwrap();
+                    *conn_guard = None;
+                }
+                Err(Error::Internal(format!("D-Bus reconnection failed: {}", e)))
+            }
+        }
     }
 }

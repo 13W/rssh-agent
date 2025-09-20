@@ -24,8 +24,9 @@ pub struct Agent {
 impl Agent {
     /// Create a new agent
     pub async fn new(config: Config) -> Self {
-        let dbus_notifications = Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
-        
+        let dbus_notifications =
+            Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
+
         Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(false)), // Start unlocked - only lock when user sends LOCK command
@@ -39,8 +40,9 @@ impl Agent {
 
     /// Create a new agent with storage directory
     pub async fn with_storage_dir(storage_dir: String, config: Config) -> Self {
-        let dbus_notifications = Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
-        
+        let dbus_notifications =
+            Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
+
         Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(false)), // Start unlocked - only lock when user sends LOCK command
@@ -58,8 +60,9 @@ impl Agent {
         config: Config,
         shutdown_signal: Arc<tokio::sync::Notify>,
     ) -> Self {
-        let dbus_notifications = Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
-        
+        let dbus_notifications =
+            Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
+
         Agent {
             ram_store: Arc::new(RamStore::new()),
             locked: Arc::new(RwLock::new(true)), // Start locked - user must unlock with master password
@@ -223,64 +226,78 @@ impl Agent {
         let fingerprint = hex::encode(hasher.finalize());
 
         // Create a confirmation function that uses D-Bus notifications
-        // Use std::sync channels to bridge async and sync
+        // Use tokio::task::block_in_place to properly handle async operations in sync context
         let dbus_notifications = self.dbus_notifications.clone();
-        
-        let confirm_fn = Box::new(
-            move |fp: &str, desc: &str, kt: &str| -> Result<bool> {
-                let fingerprint = fp.to_string();
-                let description = desc.to_string();
-                let key_type = kt.to_string();
-                
-                // Use std::sync::mpsc for sync/async communication
-                let (tx, rx) = std::sync::mpsc::channel();
-                let dbus_notifications_clone = dbus_notifications.clone();
-                
-                // Spawn task to handle async D-Bus call
-                tokio::spawn(async move {
-                    let result = if dbus_notifications_clone.is_available() {
-                        match dbus_notifications_clone
-                            .request_key_approval(&fingerprint, &description, &key_type, 30)
-                            .await
-                        {
-                            Ok(approval) => approval,
-                            Err(e) => {
-                                tracing::error!("D-Bus notification failed: {}", e);
-                                false // Deny on error
-                            }
-                        }
-                    } else {
-                        // Fallback to the original prompt system if D-Bus is not available
-                        match crate::prompt::PrompterDecision::choose() {
-                            Some(prompter) => {
-                                let prompt_text = format!(
-                                    "Allow use of {} key '{}' ({}...)?\n\n[D-Bus notifications unavailable - using fallback prompt]",
-                                    key_type,
-                                    description,
-                                    &fingerprint[..12]
-                                );
-                                prompter.confirm(&prompt_text).unwrap_or(false)
-                            }
-                            None => {
-                                tracing::warn!("No prompt method available, denying key usage");
-                                false
-                            }
-                        }
-                    };
-                    
-                    let _ = tx.send(result);
-                });
 
-                // Wait for the result with timeout to avoid hanging
-                match rx.recv_timeout(std::time::Duration::from_secs(35)) {
-                    Ok(result) => Ok(result),
-                    Err(_) => {
-                        tracing::error!("Confirmation timeout or error, denying access");
-                        Ok(false)
-                    }
+        let confirm_fn = Box::new(move |fp: &str, desc: &str, kt: &str| -> Result<bool> {
+            let fingerprint = fp.to_string();
+            let fingerprint_for_error = fingerprint.clone(); // Keep a copy for error handling
+            let description = desc.to_string();
+            let key_type = kt.to_string();
+            let dbus_notifications_clone = dbus_notifications.clone();
+
+            // Use block_in_place to run async code in sync context without race conditions
+            let result = tokio::task::block_in_place(|| {
+                // Create a new runtime handle for the async operation
+                let handle = tokio::runtime::Handle::current();
+                handle.block_on(async move {
+                        if dbus_notifications_clone.is_available() {
+                            tracing::debug!("Requesting D-Bus key approval for {}...", &fingerprint[..12]);
+                            match dbus_notifications_clone
+                                .request_key_approval(&fingerprint, &description, &key_type, 30)
+                                .await
+                            {
+                                Ok(approval) => {
+                                    tracing::info!(
+                                        "D-Bus key approval {} for {}",
+                                        if approval { "granted" } else { "denied" },
+                                        &fingerprint[..12]
+                                    );
+                                    Ok::<bool, rssh_core::Error>(approval)
+                                }
+                                Err(e) => {
+                                    tracing::error!("D-Bus notification failed for {}: {}", &fingerprint[..12], e);
+                                    // Try to reconnect for next time
+                                    if let Err(reconnect_err) = dbus_notifications_clone.ensure_connection().await {
+                                        tracing::warn!("Failed to reconnect D-Bus: {}", reconnect_err);
+                                    }
+                                    Ok::<bool, rssh_core::Error>(false) // Deny on error for security
+                                }
+                            }
+                        } else {
+                            tracing::debug!("D-Bus unavailable, falling back to prompt system");
+                            // Fallback to the original prompt system if D-Bus is not available
+                            match crate::prompt::PrompterDecision::choose() {
+                                Some(prompter) => {
+                                    let prompt_text = format!(
+                                        "Allow use of {} key '{}' ({}...)?\n\n[D-Bus notifications unavailable - using fallback prompt]",
+                                        key_type,
+                                        description,
+                                        &fingerprint[..12]
+                                    );
+                                    Ok::<bool, rssh_core::Error>(prompter.confirm(&prompt_text).unwrap_or(false))
+                                }
+                                None => {
+                                    tracing::warn!("No prompt method available, denying key usage for {}", &fingerprint[..12]);
+                                    Ok::<bool, rssh_core::Error>(false)
+                                }
+                            }
+                        }
+                    })
+            });
+
+            match result {
+                Ok(approval) => Ok(approval),
+                Err(e) => {
+                    tracing::error!(
+                        "Confirmation system error for {}: {}, denying access",
+                        &fingerprint_for_error[..12],
+                        e
+                    );
+                    Ok(false)
                 }
-            },
-        );
+            }
+        });
 
         // Find and sign with the key (with confirmation if needed)
         match self.ram_store.with_key_confirmed(
@@ -297,12 +314,12 @@ impl Agent {
                 Ok(messages::build_sign_response(&signature))
             }
             Err(rssh_core::Error::ConfirmationDenied) => {
-                tracing::info!("Signing with key {} denied by user", fingerprint);
-                return Ok(messages::build_failure());
+                tracing::warn!("Key confirmation denied for {}", fingerprint);
+                Ok(messages::build_failure())
             }
             Err(e) => {
-                tracing::warn!("Failed to sign with key {}: {}", fingerprint, e);
-                return Ok(messages::build_failure());
+                tracing::error!("Sign request failed: {}", e);
+                Ok(messages::build_failure())
             }
         }
     }
