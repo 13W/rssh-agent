@@ -51,6 +51,9 @@ pub struct KeyPayload {
     /// Default confirmation requirement for this key
     #[serde(default)]
     pub default_confirm: bool,
+    /// Default notification requirement for this key
+    #[serde(default)]
+    pub default_notification: bool,
     /// Default lifetime in seconds for this key when loaded
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_lifetime_seconds: Option<u64>,
@@ -71,6 +74,9 @@ pub struct KeyMetadata {
     /// Default confirmation requirement for this key
     #[serde(default)]
     pub default_confirm: bool,
+    /// Default notification requirement for this key
+    #[serde(default)]
+    pub default_notification: bool,
     /// Default lifetime in seconds for this key when loaded
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_lifetime_seconds: Option<u64>,
@@ -108,6 +114,7 @@ impl KeyFile {
             master_password,
             key_password,
             false, // default_confirm
+            false, // default_notification
             None,  // default_lifetime_seconds
         )
     }
@@ -122,6 +129,7 @@ impl KeyFile {
         master_password: &str,
         key_password: Option<&str>,
         default_confirm: bool,
+        default_notification: bool,
         default_lifetime_seconds: Option<u64>,
     ) -> Result<()> {
         validate_fingerprint_format(fingerprint_hex)?;
@@ -157,6 +165,7 @@ impl KeyFile {
             cert_openssh_b64,
             password_protected,
             default_confirm,
+            default_notification,
             default_lifetime_seconds,
             created: now,
             updated: now,
@@ -537,6 +546,7 @@ impl KeyFile {
             has_cert: payload.cert_openssh_b64.is_some(),
             password_protected: payload.password_protected,
             default_confirm: payload.default_confirm,
+            default_notification: payload.default_notification,
             default_lifetime_seconds: payload.default_lifetime_seconds,
             created: payload.created,
             updated: payload.updated,
@@ -549,6 +559,7 @@ impl KeyFile {
         fingerprint_hex: &str,
         master_password: &str,
         default_confirm: bool,
+        default_notification: bool,
         default_lifetime_seconds: Option<u64>,
     ) -> Result<()> {
         // Read the current payload
@@ -556,6 +567,7 @@ impl KeyFile {
 
         // Update the constraint fields and timestamp
         payload.default_confirm = default_confirm;
+        payload.default_notification = default_notification;
         payload.default_lifetime_seconds = default_lifetime_seconds;
         payload.updated = Utc::now();
 
@@ -810,6 +822,7 @@ mod tests {
             cert_openssh_b64: None,
             password_protected: false,
             default_confirm: false,
+            default_notification: false,
             default_lifetime_seconds: None,
             created: Utc::now(),
             updated: Utc::now(),
@@ -902,6 +915,7 @@ mod tests {
             cert_openssh_b64: Some(BASE64.encode(b"fake cert")),
             password_protected: false,
             default_confirm: false,
+            default_notification: false,
             default_lifetime_seconds: None,
             created: Utc::now(),
             updated: Utc::now(),

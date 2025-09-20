@@ -224,23 +224,26 @@ impl Agent {
         let mut hasher = Sha256::new();
         hasher.update(&request.key_blob);
         let fingerprint = hex::encode(hasher.finalize());
+        let fingerprint_for_logging = fingerprint.clone(); // Clone for logging after closures
 
-        // Create a confirmation function that uses D-Bus notifications
-        // Use tokio::task::block_in_place to properly handle async operations in sync context
+        // Create separate confirmation and notification functions
         let dbus_notifications = self.dbus_notifications.clone();
 
-        let confirm_fn = Box::new(move |fp: &str, desc: &str, kt: &str| -> Result<bool> {
-            let fingerprint = fp.to_string();
-            let fingerprint_for_error = fingerprint.clone(); // Keep a copy for error handling
-            let description = desc.to_string();
-            let key_type = kt.to_string();
+        // Confirmation function for confirm constraint (asks for approval)
+        let confirm_fn = {
             let dbus_notifications_clone = dbus_notifications.clone();
+            Box::new(move |fp: &str, desc: &str, kt: &str| -> Result<bool> {
+                let fingerprint = fp.to_string();
+                let fingerprint_for_error = fingerprint.clone();
+                let description = desc.to_string();
+                let key_type = kt.to_string();
+                let dbus_notifications_clone = dbus_notifications_clone.clone();
 
-            // Use block_in_place to run async code in sync context without race conditions
-            let result = tokio::task::block_in_place(|| {
-                // Create a new runtime handle for the async operation
-                let handle = tokio::runtime::Handle::current();
-                handle.block_on(async move {
+                // Use block_in_place to run async code in sync context without race conditions
+                let result = tokio::task::block_in_place(|| {
+                    // Create a new runtime handle for the async operation
+                    let handle = tokio::runtime::Handle::current();
+                    handle.block_on(async move {
                         if dbus_notifications_clone.is_available() {
                             tracing::debug!("Requesting D-Bus key approval for {}...", &fingerprint[..12]);
                             match dbus_notifications_clone
@@ -284,23 +287,83 @@ impl Agent {
                             }
                         }
                     })
-            });
+                });
 
-            match result {
-                Ok(approval) => Ok(approval),
-                Err(e) => {
-                    tracing::error!(
-                        "Confirmation system error for {}: {}, denying access",
+                match result {
+                    Ok(approval) => Ok(approval),
+                    Err(e) => {
+                        tracing::error!(
+                            "Confirmation system error for {}: {}, denying access",
+                            &fingerprint_for_error[..12],
+                            e
+                        );
+                        Ok(false)
+                    }
+                }
+            })
+        };
+
+        // Notification function for notification constraint (info-only, no approval)
+        let notify_fn = {
+            let dbus_notifications_clone = dbus_notifications.clone();
+            Box::new(move |fp: &str, desc: &str, kt: &str| -> Result<()> {
+                let fingerprint = fp.to_string();
+                let description = desc.to_string();
+                let key_type = kt.to_string();
+                let dbus_notifications_clone = dbus_notifications_clone.clone();
+
+                // Clone fingerprint for error handling after the async move
+                let fingerprint_for_error = fingerprint.clone();
+
+                // Use block_in_place to run async code in sync context without race conditions
+                let result = tokio::task::block_in_place(|| {
+                    // Create a new runtime handle for the async operation
+                    let handle = tokio::runtime::Handle::current();
+                    handle.block_on(async move {
+                        if dbus_notifications_clone.is_available() {
+                            tracing::debug!(
+                                "Showing D-Bus info notification for {}...",
+                                &fingerprint[..12]
+                            );
+                            if let Err(e) = dbus_notifications_clone
+                                .show_key_notification(&fingerprint, &description, &key_type)
+                                .await
+                            {
+                                tracing::debug!(
+                                    "D-Bus info notification failed for {}: {}",
+                                    &fingerprint[..12],
+                                    e
+                                );
+                                // Not a critical error for info-only notifications
+                            } else {
+                                tracing::debug!(
+                                    "D-Bus info notification shown for {}",
+                                    &fingerprint[..12]
+                                );
+                            }
+                        } else {
+                            tracing::debug!(
+                                "D-Bus unavailable, no notification shown for {}",
+                                &fingerprint[..12]
+                            );
+                        }
+                        Ok::<(), rssh_core::Error>(())
+                    })
+                });
+
+                result.unwrap_or_else(|e| {
+                    tracing::debug!(
+                        "Notification system error for {}: {} (non-critical)",
                         &fingerprint_for_error[..12],
                         e
                     );
-                    Ok(false)
-                }
-            }
-        });
+                });
+                Ok(())
+            })
+        };
 
-        // Find and sign with the key (with confirmation if needed)
-        match self.ram_store.with_key_confirmed(
+        // Find and sign with the key (using separate confirmation and notification callbacks)
+        match self.ram_store.with_key_confirmed_notify(
             &fingerprint,
             |key_data| {
                 use crate::signing;
@@ -308,13 +371,14 @@ impl Agent {
                     .map_err(rssh_core::Error::Internal)
             },
             Some(confirm_fn),
+            Some(notify_fn),
         ) {
             Ok(signature) => {
-                tracing::info!("Signed data with key {}", fingerprint);
+                tracing::info!("Signed data with key {}", fingerprint_for_logging);
                 Ok(messages::build_sign_response(&signature))
             }
             Err(rssh_core::Error::ConfirmationDenied) => {
-                tracing::warn!("Key confirmation denied for {}", fingerprint);
+                tracing::warn!("Key confirmation denied for {}", fingerprint_for_logging);
                 Ok(messages::build_failure())
             }
             Err(e) => {
@@ -423,7 +487,7 @@ impl Agent {
                 if confirm || lifetime_secs.is_some() {
                     if let Err(e) =
                         self.ram_store
-                            .set_constraints(&fingerprint, confirm, lifetime_secs)
+                            .set_constraints(&fingerprint, confirm, false, lifetime_secs)
                     {
                         tracing::warn!("Failed to set constraints for key {}: {}", fingerprint, e);
                         // Key was added successfully, but constraints failed - this is not fatal
@@ -949,6 +1013,23 @@ impl Agent {
                     Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
                     Err(e) => {
                         tracing::error!("Failed to handle manage.set_password: {}", e);
+                        // Check if we should return a specific error response
+                        match extensions::build_error_response(e) {
+                            Ok(error_response) => {
+                                Ok(extensions::build_extension_response(error_response))
+                            }
+                            Err(_) => Ok(messages::build_failure()),
+                        }
+                    }
+                }
+            }
+            "manage.set_constraints" => {
+                tracing::debug!("Handling manage.set_constraints extension");
+
+                match extensions::handle_manage_set_constraints(&request.data, &self.ram_store) {
+                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
+                    Err(e) => {
+                        tracing::error!("Failed to handle manage.set_constraints: {}", e);
                         // Check if we should return a specific error response
                         match extensions::build_error_response(e) {
                             Ok(error_response) => {

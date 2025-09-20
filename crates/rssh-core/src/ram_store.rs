@@ -28,6 +28,10 @@ const CLOCK_SKEW_TOLERANCE_SECS: i64 = 300; // 5 minutes tolerance for clock cha
 #[allow(dead_code)] // Used in with_key_confirmed function
 type ConfirmFn = Box<dyn Fn(&str, &str, &str) -> Result<bool>>;
 
+/// Type alias for notification function (info-only, no approval needed)
+#[allow(dead_code)] // Used in with_key_confirmed function  
+type NotifyFn = Box<dyn Fn(&str, &str, &str) -> Result<()>>;
+
 /// Encrypted key data stored in RAM
 #[derive(Clone)]
 struct EncryptedKey {
@@ -38,6 +42,7 @@ struct EncryptedKey {
     key_type: String,
     has_cert: bool,
     confirm: bool,
+    notification: bool,
     lifetime_expires_at: Option<Instant>, // Keep as Instant for lifetime expiration logic
     is_external: bool, // true if added via ssh-add, false if managed by rssh-agent
     created: chrono::DateTime<chrono::Utc>, // Use DateTime for serialization compatibility
@@ -504,6 +509,7 @@ impl RamStore {
         key_type: String,
         has_cert: bool,
         default_confirm: bool,
+        default_notification: bool,
         default_lifetime_seconds: Option<u64>,
     ) -> Result<()> {
         // First load the key normally
@@ -517,8 +523,13 @@ impl RamStore {
         )?;
 
         // Apply default constraints if any are specified
-        if default_confirm || default_lifetime_seconds.is_some() {
-            self.set_constraints(fingerprint, default_confirm, default_lifetime_seconds)?;
+        if default_confirm || default_notification || default_lifetime_seconds.is_some() {
+            self.set_constraints(
+                fingerprint,
+                default_confirm,
+                default_notification,
+                default_lifetime_seconds,
+            )?;
         }
 
         Ok(())
@@ -570,6 +581,7 @@ impl RamStore {
             key_type,
             has_cert,
             confirm: false,
+            notification: false,
             lifetime_expires_at: None,
             is_external,
             created: chrono::Utc::now(),
@@ -616,6 +628,7 @@ impl RamStore {
                     key_type: key.key_type.clone(),
                     has_cert: key.has_cert,
                     confirm: key.confirm,
+                    notification: key.notification,
                     lifetime_expires_at: key.lifetime_expires_at,
                     is_external: key.is_external,
                     created: key.created,
@@ -714,7 +727,7 @@ impl RamStore {
         result
     }
 
-    /// Decrypt a key temporarily for signing with confirmation prompt if needed
+    /// Decrypt a key temporarily for signing with confirmation or notification prompt if needed
     pub fn with_key_confirmed<F, R>(
         &self,
         fingerprint: &str,
@@ -745,7 +758,7 @@ impl RamStore {
             return Err(Error::KeyExpired);
         }
 
-        // Check if confirmation is required
+        // Check constraints - confirm takes precedence over notification
         if encrypted_key.confirm {
             if let Some(confirm_fn) = confirm_fn {
                 let description = &encrypted_key.description;
@@ -756,6 +769,86 @@ impl RamStore {
             } else {
                 // If confirm is required but no confirm function provided, deny
                 return Err(Error::ConfirmationDenied);
+            }
+        } else if encrypted_key.notification {
+            // Only show notification if confirm is not enabled (confirm takes precedence)
+            if let Some(confirm_fn) = confirm_fn {
+                let description = &encrypted_key.description;
+                let key_type = &encrypted_key.key_type;
+                // For notification, we call the function but don't check the return value
+                // This allows the function to show a notification without requiring approval
+                let _ = confirm_fn(fingerprint, description, key_type);
+            }
+        }
+
+        // Decrypt the key
+        let cipher = XChaCha20Poly1305::new_from_slice(&mem_key.key)
+            .map_err(|e| Error::Crypto(e.to_string()))?;
+        let nonce = XNonce::from_slice(&encrypted_key.nonce);
+        let mut plaintext = cipher
+            .decrypt(nonce, encrypted_key.ciphertext.as_ref())
+            .map_err(|e| Error::Crypto(e.to_string()))?;
+
+        // Use the key
+        let result = f(&plaintext);
+
+        // Zeroize the plaintext
+        plaintext.zeroize();
+
+        result
+    }
+
+    /// Decrypt a key temporarily for signing with separate confirmation and notification callbacks
+    pub fn with_key_confirmed_notify<F, R>(
+        &self,
+        fingerprint: &str,
+        f: F,
+        confirm_fn: Option<ConfirmFn>,
+        notify_fn: Option<NotifyFn>,
+    ) -> Result<R>
+    where
+        F: FnOnce(&[u8]) -> Result<R>,
+    {
+        let inner = self.inner.read().unwrap();
+
+        let mem_key = inner.mem_key.as_ref().ok_or(Error::NeedMasterUnlock)?;
+
+        let encrypted_key = inner.keys.get(fingerprint).ok_or(Error::NotFound)?;
+
+        // Check lifetime first, before cleanup
+        if let Some(expires_at) = encrypted_key.lifetime_expires_at
+            && Instant::now() >= expires_at
+        {
+            tracing::info!(
+                "Key access denied - expired: type={}, fingerprint={}",
+                encrypted_key.key_type,
+                &fingerprint[..12]
+            );
+            // Key has expired, we should remove it
+            drop(inner);
+            self.unload_key(fingerprint)?;
+            return Err(Error::KeyExpired);
+        }
+
+        // Check constraints - confirm takes precedence over notification
+        if encrypted_key.confirm {
+            if let Some(confirm_fn) = confirm_fn {
+                let description = &encrypted_key.description;
+                let key_type = &encrypted_key.key_type;
+                if !confirm_fn(fingerprint, description, key_type)? {
+                    return Err(Error::ConfirmationDenied);
+                }
+            } else {
+                // If confirm is required but no confirm function provided, deny
+                return Err(Error::ConfirmationDenied);
+            }
+        } else if encrypted_key.notification {
+            // Only show notification if confirm is not enabled (confirm takes precedence)
+            if let Some(notify_fn) = notify_fn {
+                let description = &encrypted_key.description;
+                let key_type = &encrypted_key.key_type;
+                // For notification, use the notification callback which doesn't require approval
+                let _ = notify_fn(fingerprint, description, key_type);
             }
         }
 
@@ -781,6 +874,7 @@ impl RamStore {
         &self,
         fingerprint: &str,
         confirm: bool,
+        notification: bool,
         lifetime_secs: Option<u64>,
     ) -> Result<()> {
         let mut inner = self.inner.write().unwrap();
@@ -792,6 +886,7 @@ impl RamStore {
         let key = inner.keys.get_mut(fingerprint).ok_or(Error::NotFound)?;
 
         key.confirm = confirm;
+        key.notification = notification;
         key.lifetime_expires_at =
             lifetime_secs.map(|secs| Instant::now() + Duration::from_secs(secs));
         key.updated = Some(chrono::Utc::now()); // Mark as updated
@@ -851,6 +946,7 @@ pub struct KeyInfo {
     pub key_type: String,
     pub has_cert: bool,
     pub confirm: bool,
+    pub notification: bool,
     pub lifetime_expires_at: Option<Instant>, // Keep as Instant for lifetime expiration logic
     pub is_external: bool,
     pub created: chrono::DateTime<chrono::Utc>, // Use DateTime for serialization compatibility
@@ -956,7 +1052,7 @@ mod tests {
             .unwrap();
 
         // Set confirm constraint
-        store.set_constraints("fp1", true, None).unwrap();
+        store.set_constraints("fp1", true, false, None).unwrap();
 
         // Test with confirmation function that approves
         let approve_fn =
@@ -1039,7 +1135,7 @@ mod tests {
             .unwrap();
 
         // Set a very short lifetime (1 second)
-        store.set_constraints("fp1", false, Some(1)).unwrap();
+        store.set_constraints("fp1", false, false, Some(1)).unwrap();
 
         // Key should be accessible initially
         let result = store.with_key("fp1", |_| Ok("success".to_string()));
@@ -1076,9 +1172,9 @@ mod tests {
             .unwrap();
 
         // Set lifetimes - some expired, some not
-        store.set_constraints("fp1", false, Some(1)).unwrap(); // Will expire
-        store.set_constraints("fp2", false, None).unwrap(); // No expiry
-        store.set_constraints("fp3", false, Some(1)).unwrap(); // Will expire
+        store.set_constraints("fp1", false, false, Some(1)).unwrap(); // Will expire
+        store.set_constraints("fp2", false, false, None).unwrap(); // No expiry
+        store.set_constraints("fp3", false, false, Some(1)).unwrap(); // Will expire
 
         // Wait for expiry
         std::thread::sleep(Duration::from_secs(2));
@@ -1107,7 +1203,9 @@ mod tests {
         store
             .load_key("fp1", b"data", "test key".into(), "ed25519".into(), false)
             .unwrap();
-        store.set_constraints("fp1", false, Some(36000)).unwrap(); // 10 hours
+        store
+            .set_constraints("fp1", false, false, Some(36000))
+            .unwrap(); // 10 hours
 
         // Verify key is accessible
         let result = store.with_key("fp1", |_| Ok("initial".to_string()));
@@ -1186,7 +1284,7 @@ mod tests {
             .unwrap();
 
         // Set very short lifetime
-        store.set_constraints("fp1", false, Some(1)).unwrap();
+        store.set_constraints("fp1", false, false, Some(1)).unwrap();
 
         // Wait for expiry
         std::thread::sleep(Duration::from_secs(2));
@@ -1215,7 +1313,7 @@ mod tests {
             .unwrap();
 
         // Set confirm constraint and short lifetime
-        store.set_constraints("fp1", true, Some(1)).unwrap();
+        store.set_constraints("fp1", true, false, Some(1)).unwrap();
 
         // Create confirmation function
         let confirm_fn = Box::new(|_fp: &str, _desc: &str, _key_type: &str| -> Result<bool> {

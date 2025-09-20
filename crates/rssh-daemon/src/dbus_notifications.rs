@@ -95,6 +95,53 @@ impl DbusNotificationService {
         }
     }
 
+    /// Show an info-only notification about SSH key usage (no approval needed)
+    /// This is used for notification constraint - just informs user, doesn't block
+    pub async fn show_key_notification(
+        &self,
+        fingerprint: &str,
+        description: &str,
+        key_type: &str,
+    ) -> Result<()> {
+        let connection = {
+            let conn_guard = self.connection.lock().unwrap();
+            match conn_guard.as_ref() {
+                Some(conn) => conn.clone(),
+                None => {
+                    tracing::debug!("D-Bus connection not available, skipping notification");
+                    return Ok(()); // Not an error for info-only notifications
+                }
+            }
+        };
+
+        let summary = "SSH Key Used";
+        let body = format!(
+            "{} key '{}' was used for authentication.\n\nFingerprint: {}...",
+            key_type,
+            description,
+            &fingerprint[..12]
+        );
+
+        // Show notification without action buttons (info-only)
+        match self
+            .show_info_notification(&connection, summary, &body)
+            .await
+        {
+            Ok(()) => {
+                tracing::debug!(
+                    "Showed info notification for key usage: {}",
+                    &fingerprint[..12]
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!("D-Bus info notification failed: {}", e);
+                // Not a critical error for info-only notifications
+                Ok(())
+            }
+        }
+    }
+
     /// Show the actual notification with approval/denial buttons using the freedesktop notifications spec
     async fn show_approval_notification(
         &self,
@@ -197,6 +244,68 @@ impl DbusNotificationService {
                 }
             }
         }
+    }
+
+    /// Show an info-only notification (no action buttons)
+    async fn show_info_notification(
+        &self,
+        connection: &Connection,
+        summary: &str,
+        body: &str,
+    ) -> ZBusResult<()> {
+        use zbus::proxy;
+
+        // Use the org.freedesktop.Notifications D-Bus interface
+        #[proxy(
+            interface = "org.freedesktop.Notifications",
+            default_service = "org.freedesktop.Notifications",
+            default_path = "/org/freedesktop/Notifications"
+        )]
+        trait Notifications {
+            async fn notify(
+                &self,
+                app_name: &str,
+                replaces_id: u32,
+                app_icon: &str,
+                summary: &str,
+                body: &str,
+                actions: Vec<&str>,
+                hints: std::collections::HashMap<&str, zbus::zvariant::Value<'_>>,
+                expire_timeout: i32,
+            ) -> zbus::Result<u32>;
+        }
+
+        let proxy = NotificationsProxy::new(connection).await?;
+
+        // Create notification without action buttons (info-only)
+        let actions = vec![]; // Empty actions = no buttons
+        let mut hints = std::collections::HashMap::new();
+
+        // Set urgency to normal for info notifications
+        hints.insert("urgency", zbus::zvariant::Value::U8(1));
+        hints.insert(
+            "category",
+            zbus::zvariant::Value::Str("network.connected".into()),
+        );
+
+        // Auto-expire after 5 seconds
+        let expire_timeout = 5000; // 5 seconds in milliseconds
+
+        let notification_id = proxy
+            .notify(
+                "rssh-agent",
+                0,
+                "network-transmit-receive", // Icon name for info notifications
+                summary,
+                body,
+                actions,
+                hints,
+                expire_timeout,
+            )
+            .await?;
+
+        tracing::debug!("Showed info notification with ID: {}", notification_id);
+        Ok(())
     }
 
     /// Check if D-Bus notifications are available

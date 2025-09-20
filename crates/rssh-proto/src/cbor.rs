@@ -73,6 +73,8 @@ pub struct ManageCreateRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirm: Option<bool>, // Require confirmation for key usage
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub notification: Option<bool>, // Require notification for key usage
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub lifetime_seconds: Option<u32>, // Lifetime constraint in seconds
 }
 
@@ -134,6 +136,8 @@ pub struct ManageSetPasswordResponse {
 pub struct ManageSetDefaultConstraintsRequest {
     pub fp_sha256_hex: String,
     pub default_confirm: bool,
+    #[serde(default)]
+    pub default_notification: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_lifetime_seconds: Option<u64>,
 }

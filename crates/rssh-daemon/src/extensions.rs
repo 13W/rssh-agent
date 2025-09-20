@@ -1,8 +1,9 @@
-use rssh_core::{Error, Result, ram_store::KeyInfo};
+use rssh_core::{Error, Result, ram_store::{KeyInfo, RamStore}};
 use serde::Deserialize;
 use ssh_key::rand_core::OsRng;
 use std::collections::HashSet;
 use std::fs;
+use std::sync::Arc;
 
 pub const EXTENSION_NAMESPACE: &str = "rssh-agent@local";
 
@@ -136,6 +137,7 @@ pub fn handle_manage_list(
             // Build constraints object
             let constraints = serde_json::json!({
                 "confirm": key.confirm,
+                "notification": key.notification,
                 "lifetime_expires_at": key.lifetime_expires_at.map(|t| {
                     // Convert Instant to ISO 8601 string
                     let duration = t.duration_since(std::time::Instant::now());
@@ -152,6 +154,7 @@ pub fn handle_manage_list(
                         Ok(metadata) => {
                             let defaults = Some(serde_json::json!({
                                 "default_confirm": metadata.default_confirm,
+                                "default_notification": metadata.default_notification,
                                 "default_lifetime_seconds": metadata.default_lifetime_seconds,
                             }));
                             (metadata.password_protected, defaults)
@@ -219,10 +222,12 @@ pub fn handle_manage_list(
                         password_protected: metadata.password_protected,
                         constraints: serde_json::json!({
                             "confirm": false,
+                            "notification": false,
                             "lifetime_expires_at": null,
                         }),
                         default_constraints: Some(serde_json::json!({
                             "default_confirm": metadata.default_confirm,
+                            "default_notification": metadata.default_notification,
                             "default_lifetime_seconds": metadata.default_lifetime_seconds,
                         })),
                         created: Some(metadata.created.to_rfc3339()),
@@ -245,6 +250,7 @@ pub fn handle_manage_list(
                         password_protected: false,      // Can't determine without decrypting
                         constraints: serde_json::json!({
                             "confirm": false,
+                            "notification": false,
                             "lifetime_expires_at": null,
                         }),
                         default_constraints: None, // Can't determine without decrypting
@@ -267,6 +273,7 @@ pub fn handle_manage_list(
                 password_protected: false,      // Can't determine without decrypting
                 constraints: serde_json::json!({
                     "confirm": false,
+                    "notification": false,
                     "lifetime_expires_at": null,
                 }),
                 default_constraints: None, // Can't determine without master password
@@ -651,6 +658,7 @@ pub async fn handle_manage_import(
         cert_openssh_b64,
         password_protected,
         default_confirm: false,
+        default_notification: false,
         default_lifetime_seconds: None,
         created: now,
         updated: now,
@@ -881,6 +889,7 @@ pub async fn handle_manage_import_direct(data: &[u8], master_password: &str) -> 
         cert_openssh_b64: None,
         password_protected,
         default_confirm: false,
+        default_notification: false,
         default_lifetime_seconds: None,
         created: now,
         updated: now,
@@ -937,6 +946,8 @@ pub async fn handle_manage_load(
         key_pass_b64: Option<String>,
         // Constraint support
         confirm: Option<bool>,
+        #[serde(default)]
+        notification: Option<bool>,
         lifetime_seconds: Option<u32>,
     }
 
@@ -996,6 +1007,9 @@ pub async fn handle_manage_load(
     // 2. Stored default constraints from keyfile metadata
     // 3. System defaults (false/None) (lowest priority)
     let final_confirm = request.confirm.unwrap_or(metadata.default_confirm);
+    let final_notification = request
+        .notification
+        .unwrap_or(metadata.default_notification);
     let final_lifetime_secs = request
         .lifetime_seconds
         .map(|secs| secs as u64)
@@ -1009,13 +1023,15 @@ pub async fn handle_manage_load(
         key_type_str,
         metadata.has_cert,
         final_confirm,
+        final_notification,
         final_lifetime_secs,
     )?;
 
     tracing::debug!(
-        "Loaded key {} with constraints: confirm={}, lifetime={:?}",
+        "Loaded key {} with constraints: confirm={}, notification={}, lifetime={:?}",
         &request.fp_sha256_hex[..12],
         final_confirm,
+        final_notification,
         final_lifetime_secs
     );
 
@@ -1262,6 +1278,8 @@ pub fn handle_manage_set_default_constraints(
     struct SetDefaultConstraintsRequest {
         fp_sha256_hex: String,
         default_confirm: bool,
+        #[serde(default)]
+        default_notification: bool,
         default_lifetime_seconds: Option<u64>,
     }
 
@@ -1283,6 +1301,7 @@ pub fn handle_manage_set_default_constraints(
         &request.fp_sha256_hex,
         master_password,
         request.default_confirm,
+        request.default_notification,
         request.default_lifetime_seconds,
     )
     .map_err(|e| match e {
@@ -1292,9 +1311,10 @@ pub fn handle_manage_set_default_constraints(
     })?;
 
     tracing::debug!(
-        "Updated default constraints for key {}: confirm={}, lifetime={:?}",
+        "Updated default constraints for key {}: confirm={}, notification={}, lifetime={:?}",
         &request.fp_sha256_hex[..12],
         request.default_confirm,
+        request.default_notification,
         request.default_lifetime_seconds
     );
 
@@ -1303,7 +1323,73 @@ pub fn handle_manage_set_default_constraints(
         "ok": true,
         "fp_sha256_hex": request.fp_sha256_hex,
         "default_confirm": request.default_confirm,
+        "default_notification": request.default_notification,
         "default_lifetime_seconds": request.default_lifetime_seconds
+    });
+
+    // Convert to CBOR bytes for the data field
+    let mut data_cbor = Vec::new();
+    ciborium::into_writer(&response_data, &mut data_cbor)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    // Create the ExtensionResponse
+    let response = rssh_proto::cbor::ExtensionResponse {
+        success: true,
+        data: data_cbor,
+    };
+
+    // Serialize the whole response to CBOR
+    let mut cbor_data = Vec::new();
+    ciborium::into_writer(&response, &mut cbor_data)
+        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
+
+    Ok(cbor_data)
+}
+
+/// Handle manage.set_constraints extension - sets constraints for a loaded key in RAM immediately
+pub fn handle_manage_set_constraints(data: &[u8], ram_store: &Arc<RamStore>) -> Result<Vec<u8>> {
+    #[derive(Debug, Deserialize)]
+    struct SetConstraintsRequest {
+        fp_sha256_hex: String,
+        confirm: bool,
+        #[serde(default)]
+        notification: bool,
+        lifetime_seconds: Option<u64>,
+    }
+
+    // Parse the CBOR request data
+    let request: SetConstraintsRequest = ciborium::from_reader(data)
+        .map_err(|e| Error::Internal(format!("Failed to parse set_constraints request: {}", e)))?;
+
+    // Update the constraints in RAM store immediately
+    ram_store
+        .set_constraints(
+            &request.fp_sha256_hex,
+            request.confirm,
+            request.notification,
+            request.lifetime_seconds,
+        )
+        .map_err(|e| match e {
+            rssh_core::Error::NotFound => Error::NotFound,
+            rssh_core::Error::NeedMasterUnlock => Error::Internal("Agent locked".to_string()),
+            _ => Error::Internal(format!("Failed to update constraints: {}", e)),
+        })?;
+
+    tracing::info!(
+        "Updated constraints for loaded key {}: confirm={}, notification={}, lifetime={:?}",
+        &request.fp_sha256_hex[..12],
+        request.confirm,
+        request.notification,
+        request.lifetime_seconds
+    );
+
+    // Create success response
+    let response_data = serde_json::json!({
+        "ok": true,
+        "fp_sha256_hex": request.fp_sha256_hex,
+        "confirm": request.confirm,
+        "notification": request.notification,
+        "lifetime_seconds": request.lifetime_seconds
     });
 
     // Convert to CBOR bytes for the data field
@@ -1788,8 +1874,9 @@ pub async fn handle_manage_create(
         secret_openssh_b64,
         cert_openssh_b64: None,
         password_protected: false, // New keys created via manage.create are not password-protected
-        default_confirm: false,
-        default_lifetime_seconds: None,
+        default_confirm: request.confirm.unwrap_or(false),
+        default_notification: request.notification.unwrap_or(false),
+        default_lifetime_seconds: request.lifetime_seconds.map(|s| s as u64),
         created: now,
         updated: now,
     };
@@ -1825,15 +1912,18 @@ pub async fn handle_manage_create(
                             rssh_core::keyfile::KeyType::Rsa => "rsa".to_string(),
                         };
 
-                        // Load the key into RAM
+                        // Load the key into RAM with default constraints applied
                         // Note: The load_key method expects wire format, and we're now storing wire format
                         // This is consistent with the import functionality
-                        if let Err(e) = ram_store.load_key(
+                        if let Err(e) = ram_store.load_key_with_defaults(
                             &fingerprint_hex,
                             &wire_key_data,
                             key_payload.description,
                             key_type_str,
                             key_payload.cert_openssh_b64.is_some(),
+                            key_payload.default_confirm,
+                            key_payload.default_notification,
+                            key_payload.default_lifetime_seconds,
                         ) {
                             tracing::warn!("Failed to load newly created key to RAM: {}", e);
                             // Don't fail the entire operation if RAM loading fails
