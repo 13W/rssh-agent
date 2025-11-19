@@ -1,7 +1,7 @@
+use rand;
 use rssh_core::{Result, config::Config};
 use rssh_daemon::daemon::{DaemonConfig, ShellStyle, run_daemon};
 use std::path::PathBuf;
-use rand;
 
 pub struct DaemonCommand;
 
@@ -15,7 +15,6 @@ impl DaemonCommand {
         require_mlock: bool,
         storage_dir: Option<String>,
     ) -> Result<()> {
-
         // Determine storage directory
         let storage_dir = resolve_storage_dir(storage_dir)?;
 
@@ -42,7 +41,14 @@ impl DaemonCommand {
 
         // Handle forking at CLI level if not in foreground mode
         if !foreground {
-            return Self::handle_daemon_fork(socket, storage_dir, config, shell_style, require_mlock).await;
+            return Self::handle_daemon_fork(
+                socket,
+                storage_dir,
+                config,
+                shell_style,
+                require_mlock,
+            )
+            .await;
         }
 
         // Foreground mode: create daemon config and run normally
@@ -66,7 +72,7 @@ impl DaemonCommand {
     ) -> Result<()> {
         use nix::unistd::{ForkResult, fork, setsid};
         use std::os::unix::io::AsRawFd;
-        
+
         // For background mode, we need to generate the socket path but NOT create the directory yet
         // The child process will handle directory creation to avoid race conditions
         let socket_path = if let Some(socket_path) = socket {
@@ -101,7 +107,7 @@ impl DaemonCommand {
             }
             Ok(ForkResult::Child) => {
                 // Child process: become daemon and run in new runtime
-                
+
                 // Become session leader
                 setsid().map_err(|e| rssh_core::Error::Io(e.into()))?;
 
@@ -116,14 +122,15 @@ impl DaemonCommand {
                 let devnull = std::fs::File::open("/dev/null")?;
                 let devnull_fd = devnull.as_raw_fd();
                 unsafe {
-                    libc::dup2(devnull_fd, 0);    // Close stdin
-                    libc::dup2(log_fd, 1);        // Redirect stdout to log file
-                    libc::dup2(log_fd, 2);        // Redirect stderr to log file
+                    libc::dup2(devnull_fd, 0); // Close stdin
+                    libc::dup2(log_fd, 1); // Redirect stdout to log file
+                    libc::dup2(log_fd, 2); // Redirect stderr to log file
                 }
 
                 // Create fresh Tokio runtime for child process
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| rssh_core::Error::Internal(format!("Failed to create runtime: {}", e)))?;
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    rssh_core::Error::Internal(format!("Failed to create runtime: {}", e))
+                })?;
 
                 rt.block_on(async {
                     let daemon_config = DaemonConfig {
@@ -137,9 +144,7 @@ impl DaemonCommand {
                     run_daemon(daemon_config, None).await
                 })
             }
-            Err(e) => {
-                Err(rssh_core::Error::Io(e.into()))
-            }
+            Err(e) => Err(rssh_core::Error::Io(e.into())),
         }
     }
 }

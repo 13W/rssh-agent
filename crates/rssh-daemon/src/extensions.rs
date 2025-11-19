@@ -1,4 +1,7 @@
-use rssh_core::{Error, Result, ram_store::{KeyInfo, RamStore}};
+use rssh_core::{
+    Error, Result,
+    ram_store::{KeyInfo, RamStore},
+};
 use serde::Deserialize;
 use ssh_key::rand_core::OsRng;
 use std::collections::HashSet;

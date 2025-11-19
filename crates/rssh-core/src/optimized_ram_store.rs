@@ -11,12 +11,12 @@ use crate::{
     perf_cache::{ConnectionKeyCache, KeyDerivationCache},
 };
 use argon2::{Argon2, Params, Version};
+use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, OsRng},
 };
 use parking_lot::RwLock; // Faster than std::sync::RwLock
-use chacha20poly1305::aead::rand_core::RngCore;
 use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;

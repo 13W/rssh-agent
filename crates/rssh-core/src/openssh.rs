@@ -237,8 +237,8 @@ impl SshPrivateKey {
             return Err(Error::RsaTooLarge);
         }
 
-        let keypair = RsaKeypair::random(&mut OsRng, bits)
-            .map_err(|e| Error::Crypto(e.to_string()))?;
+        let keypair =
+            RsaKeypair::random(&mut OsRng, bits).map_err(|e| Error::Crypto(e.to_string()))?;
         let key_data = KeypairData::Rsa(keypair);
 
         // Create PrivateKey with the keypair data

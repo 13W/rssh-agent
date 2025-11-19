@@ -26,7 +26,11 @@ pub struct SocketServer {
 
 impl SocketServer {
     /// Create a new socket server with a path-based socket
-    pub fn new(socket_path: PathBuf, agent: Arc<Agent>, shutdown_signal: Arc<tokio::sync::Notify>) -> Self {
+    pub fn new(
+        socket_path: PathBuf,
+        agent: Arc<Agent>,
+        shutdown_signal: Arc<tokio::sync::Notify>,
+    ) -> Self {
         SocketServer {
             socket_path: Some(socket_path),
             agent,
@@ -46,7 +50,10 @@ impl SocketServer {
     }
 
     /// Create socket in /tmp/ssh-XXXXXX/agent.<pid> format
-    pub fn create_temp_socket(agent: Arc<Agent>, shutdown_signal: Arc<tokio::sync::Notify>) -> Result<Self> {
+    pub fn create_temp_socket(
+        agent: Arc<Agent>,
+        shutdown_signal: Arc<tokio::sync::Notify>,
+    ) -> Result<Self> {
         let pid = std::process::id();
 
         // Generate random directory name
@@ -75,8 +82,9 @@ impl SocketServer {
 
     /// Start the socket server with a path-based socket
     pub async fn run(&self) -> Result<()> {
-        let socket_path = self.socket_path.as_ref()
-            .ok_or_else(|| Error::Internal("Cannot run path-based server without socket path".into()))?;
+        let socket_path = self.socket_path.as_ref().ok_or_else(|| {
+            Error::Internal("Cannot run path-based server without socket path".into())
+        })?;
 
         // Remove existing socket if it exists
         if socket_path.exists() {
@@ -166,7 +174,10 @@ impl SocketServer {
         // Wait a moment for active client connections to finish
         let active_clients = client_count.load(Ordering::Relaxed);
         if active_clients > 0 {
-            tracing::info!("Waiting for {} active client connections to finish", active_clients);
+            tracing::info!(
+                "Waiting for {} active client connections to finish",
+                active_clients
+            );
             // Give clients a brief moment to finish ongoing requests
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
@@ -319,8 +330,8 @@ mod tests {
         assert!(server.cleanup().is_ok());
     }
 
-    #[test]
-    fn test_temp_socket_creation() {
+    #[tokio::test]
+    async fn test_temp_socket_creation() {
         use rssh_core::config::Config;
 
         let temp_dir = TempDir::new().unwrap();
@@ -329,7 +340,9 @@ mod tests {
         let shutdown_signal = Arc::new(tokio::sync::Notify::new());
         let server = SocketServer::create_temp_socket(agent, shutdown_signal).unwrap();
 
-        let path = server.socket_path().expect("Temp socket should have a path");
+        let path = server
+            .socket_path()
+            .expect("Temp socket should have a path");
         assert!(path.to_str().unwrap().contains("/tmp/ssh-"));
         assert!(path.to_str().unwrap().contains("/agent."));
 
@@ -361,9 +374,7 @@ mod tests {
 
         // This should succeed now (previously would fail)
         // Start server in background task since run() blocks
-        let server_handle = tokio::spawn(async move {
-            server.run().await
-        });
+        let server_handle = tokio::spawn(async move { server.run().await });
 
         // Give it a moment to start up
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

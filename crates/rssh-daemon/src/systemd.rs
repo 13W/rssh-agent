@@ -3,9 +3,9 @@
 //! This module provides functionality to detect and use systemd socket activation
 //! according to the systemd socket activation protocol.
 
+use rssh_core::{Error, Result};
 use std::os::unix::io::FromRawFd;
 use tokio::net::UnixListener;
-use rssh_core::{Error, Result};
 
 /// Check if the daemon is being run under systemd socket activation
 ///
@@ -17,7 +17,7 @@ pub fn is_systemd_activated() -> bool {
         Ok(fds) => {
             tracing::debug!("LISTEN_FDS environment variable: '{}'", fds);
             fds
-        },
+        }
         Err(_) => {
             tracing::debug!("LISTEN_FDS environment variable not found");
             return false;
@@ -41,7 +41,7 @@ pub fn is_systemd_activated() -> bool {
                     return false;
                 }
             }
-        },
+        }
         Err(_) => {
             tracing::debug!("LISTEN_PID environment variable not found");
             return false;
@@ -50,10 +50,12 @@ pub fn is_systemd_activated() -> bool {
 
     let current_pid = std::process::id();
     let is_activated = listen_pid == current_pid;
-    
+
     tracing::debug!(
         "Systemd activation check: LISTEN_PID={}, current_pid={}, activated={}",
-        listen_pid, current_pid, is_activated
+        listen_pid,
+        current_pid,
+        is_activated
     );
 
     is_activated
@@ -78,19 +80,18 @@ pub fn take_systemd_socket() -> Result<UnixListener> {
 
     // SAFETY: We've verified systemd activation via is_systemd_activated(),
     // so FD 3 should be a valid Unix domain socket created by systemd.
-    let std_listener = unsafe {
-        std::os::unix::net::UnixListener::from_raw_fd(SD_LISTEN_FDS_START)
-    };
+    let std_listener =
+        unsafe { std::os::unix::net::UnixListener::from_raw_fd(SD_LISTEN_FDS_START) };
 
     // Ensure the socket is in non-blocking mode before converting to tokio
-    std_listener.set_nonblocking(true)
+    std_listener
+        .set_nonblocking(true)
         .map_err(|e| Error::Io(e))?;
 
     tracing::debug!("Socket set to non-blocking mode");
 
     // Convert to tokio UnixListener
-    let tokio_listener = UnixListener::from_std(std_listener)
-        .map_err(|e| Error::Io(e))?;
+    let tokio_listener = UnixListener::from_std(std_listener).map_err(|e| Error::Io(e))?;
 
     tracing::debug!("Successfully converted to tokio UnixListener");
 

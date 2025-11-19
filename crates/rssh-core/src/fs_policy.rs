@@ -43,7 +43,8 @@ pub fn ensure_dir_secure<P: AsRef<Path>>(path: P) -> Result<()> {
 
 /// Ensure file has mode 0600
 pub fn ensure_file_mode_0600(file: &File) -> Result<()> {
-    fchmod(file, Mode::from_bits_truncate(0o600)).map_err(|e| Error::Io(std::io::Error::from(e)))?;
+    fchmod(file, Mode::from_bits_truncate(0o600))
+        .map_err(|e| Error::Io(std::io::Error::from(e)))?;
     Ok(())
 }
 

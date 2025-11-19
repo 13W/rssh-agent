@@ -62,19 +62,30 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     let shutdown_signal = Arc::new(tokio::sync::Notify::new());
 
     // Create the agent with storage directory and shutdown signal
-    let agent = Arc::new(Agent::with_storage_dir_and_shutdown(
-        config.storage_dir.clone(),
-        config.config.clone(),
-        shutdown_signal.clone(),
-    ).await);
+    let agent = Arc::new(
+        Agent::with_storage_dir_and_shutdown(
+            config.storage_dir.clone(),
+            config.config.clone(),
+            shutdown_signal.clone(),
+        )
+        .await,
+    );
 
     // Create socket server
-    tracing::info!("Creating socket server with config: socket_path={:?}, foreground={}", config.socket_path, config.foreground);
+    tracing::info!(
+        "Creating socket server with config: socket_path={:?}, foreground={}",
+        config.socket_path,
+        config.foreground
+    );
     let (server, socket_path, systemd_listener) = if systemd::is_systemd_activated() {
         tracing::info!("Detected systemd socket activation");
         let listener = systemd::take_systemd_socket()?;
         let server = SocketServer::from_listener(agent.clone(), shutdown_signal.clone());
-        (server, String::from("systemd-activated-socket"), Some(listener))
+        (
+            server,
+            String::from("systemd-activated-socket"),
+            Some(listener),
+        )
     } else if let Some(socket_path) = config.socket_path {
         // For socket paths, ensure the directory exists
         let socket_path_buf = std::path::PathBuf::from(&socket_path);
@@ -89,15 +100,27 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
                         tracing::info!("Directory name: '{}', length: {}", dir_str, dir_str.len());
                         if dir_str.starts_with("ssh-") && dir_str.len() == 10 {
                             // This is a temp directory - create it with proper permissions
-                            tracing::info!("Creating temp socket directory: {}", parent_dir.display());
+                            tracing::info!(
+                                "Creating temp socket directory: {}",
+                                parent_dir.display()
+                            );
                             std::fs::create_dir_all(parent_dir)?;
-                            std::fs::set_permissions(parent_dir, std::fs::Permissions::from_mode(0o700))?;
-                            tracing::info!("Successfully created temp socket directory: {}", parent_dir.display());
+                            std::fs::set_permissions(
+                                parent_dir,
+                                std::fs::Permissions::from_mode(0o700),
+                            )?;
+                            tracing::info!(
+                                "Successfully created temp socket directory: {}",
+                                parent_dir.display()
+                            );
                         } else {
                             // Regular directory path
                             tracing::info!("Creating regular directory: {}", parent_dir.display());
                             std::fs::create_dir_all(parent_dir)?;
-                            std::fs::set_permissions(parent_dir, std::fs::Permissions::from_mode(0o700))?;
+                            std::fs::set_permissions(
+                                parent_dir,
+                                std::fs::Permissions::from_mode(0o700),
+                            )?;
                         }
                     } else {
                         tracing::warn!("Could not convert directory name to string");
@@ -114,12 +137,20 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
         } else {
             tracing::warn!("No parent directory found for socket path: {}", socket_path);
         }
-        let server = SocketServer::new(socket_path.clone().into(), agent.clone(), shutdown_signal.clone());
+        let server = SocketServer::new(
+            socket_path.clone().into(),
+            agent.clone(),
+            shutdown_signal.clone(),
+        );
         (server, socket_path, None)
     } else {
         // No socket path provided, create temp socket
         let server = SocketServer::create_temp_socket(agent.clone(), shutdown_signal.clone())?;
-        let path = server.socket_path().expect("Temp socket should have path").to_string_lossy().to_string();
+        let path = server
+            .socket_path()
+            .expect("Temp socket should have path")
+            .to_string_lossy()
+            .to_string();
         (server, path, None)
     };
 
@@ -223,9 +254,6 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
     Ok(())
 }
 
-
-
-
 /// Apply security hardening
 pub fn apply_hardening(require_mlock: bool) -> Result<()> {
     use nix::sys::mman::{MlockAllFlags, mlockall};
@@ -286,7 +314,6 @@ pub fn apply_hardening(require_mlock: bool) -> Result<()> {
     tracing::info!("Security hardening applied");
     Ok(())
 }
-
 
 #[cfg(test)]
 mod tests {
