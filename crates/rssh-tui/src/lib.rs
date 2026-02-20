@@ -603,7 +603,7 @@ impl App {
                 self.modal_input_buffer.clear(); // Old password
                 self.modal_input_buffer2.clear(); // New password 
                 self.modal_input_buffer3.clear(); // Confirm password
-                self.modal_selected_field = if key.password_protected { 0 } else { 1 }; // Skip old password if not protected
+                self.modal_selected_field = 0; // Always start at first field
                 self.modal_error = None;
             }
         }
@@ -1242,7 +1242,7 @@ fn run_app<B: Backend>(
                                 Err(e) => {
                                     app.modal_error = Some(format!("Failed to load key: {}", e));
                                     // Don't exit modal on error, let user retry
-                                    return Ok(());
+                                    continue;
                                 }
                             }
                         }
@@ -1646,7 +1646,7 @@ fn run_app<B: Backend>(
                                 }
                                 Err(e) => {
                                     app.set_status(format!("Invalid lifetime format: {}", e));
-                                    return Ok(());
+                                    continue;
                                 }
                             }
                         }
@@ -1725,7 +1725,7 @@ fn run_app<B: Backend>(
                                 Err(e) => {
                                     app.modal_error =
                                         Some(format!("Failed to update description: {}", e));
-                                    return Ok(());
+                                    continue;
                                 }
                             }
                         }
@@ -1757,7 +1757,7 @@ fn run_app<B: Backend>(
                                     if app.modal_input_buffer.is_empty() {
                                         app.modal_error =
                                             Some("Old password is required".to_string());
-                                        return Ok(());
+                                        continue;
                                     }
                                     Some(app.modal_input_buffer.as_str())
                                 } else {
@@ -1766,18 +1766,18 @@ fn run_app<B: Backend>(
 
                                 if app.modal_input_buffer2.is_empty() {
                                     app.modal_error = Some("New password is required".to_string());
-                                    return Ok(());
+                                    continue;
                                 }
 
                                 if app.modal_input_buffer2.len() < 8 {
                                     app.modal_error =
                                         Some("Password must be at least 8 characters".to_string());
-                                    return Ok(());
+                                    continue;
                                 }
 
                                 if app.modal_input_buffer2 != app.modal_input_buffer3 {
                                     app.modal_error = Some("Passwords do not match".to_string());
-                                    return Ok(());
+                                    continue;
                                 }
 
                                 // Change password
@@ -1815,25 +1815,33 @@ fn run_app<B: Backend>(
                         app.modal_previous_field();
                     }
                     KeyCode::Char(c) => {
-                        match app.modal_selected_field {
-                            0 => app.modal_input_buffer.push(c),  // Old password
-                            1 => app.modal_input_buffer2.push(c), // New password
-                            2 => app.modal_input_buffer3.push(c), // Confirm password
+                        let needs_old_password = app.selected_key
+                            .and_then(|idx| app.keys.get(idx))
+                            .map(|k| k.password_protected)
+                            .unwrap_or(false);
+
+                        match (app.modal_selected_field, needs_old_password) {
+                            (0, true) => app.modal_input_buffer.push(c),   // Old
+                            (0, false) => app.modal_input_buffer2.push(c), // New
+                            (1, true) => app.modal_input_buffer2.push(c),  // New
+                            (1, false) => app.modal_input_buffer3.push(c), // Confirm
+                            (2, true) => app.modal_input_buffer3.push(c),  // Confirm
                             _ => {}
                         }
                         app.modal_error = None;
                     }
                     KeyCode::Backspace => {
-                        match app.modal_selected_field {
-                            0 => {
-                                app.modal_input_buffer.pop();
-                            }
-                            1 => {
-                                app.modal_input_buffer2.pop();
-                            }
-                            2 => {
-                                app.modal_input_buffer3.pop();
-                            }
+                        let needs_old_password = app.selected_key
+                            .and_then(|idx| app.keys.get(idx))
+                            .map(|k| k.password_protected)
+                            .unwrap_or(false);
+
+                        match (app.modal_selected_field, needs_old_password) {
+                            (0, true) => { app.modal_input_buffer.pop(); }
+                            (0, false) => { app.modal_input_buffer2.pop(); }
+                            (1, true) => { app.modal_input_buffer2.pop(); }
+                            (1, false) => { app.modal_input_buffer3.pop(); }
+                            (2, true) => { app.modal_input_buffer3.pop(); }
                             _ => {}
                         }
                         app.modal_error = None;
@@ -1849,13 +1857,20 @@ fn run_app<B: Backend>(
                                 if idx < app.keys.len() && app.keys[idx].loaded {
                                     let (confirm, notify) = app.modal_constraint_runtime.to_bools();
 
-                                    // Get current lifetime to preserve it
+                                    // Get current lifetime to preserve it: compute
+                                    // remaining seconds from the expiry timestamp.
                                     let current_lifetime = app.keys[idx]
                                         .constraints
-                                        .get("lifetime_seconds")
-                                        .and_then(|v| v.as_u64())
-                                        .filter(|&seconds| seconds > 0)
-                                        .map(|seconds| format_lifetime_friendly(seconds as u32));
+                                        .get("lifetime_expires_at")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                        .and_then(|expires_at| {
+                                            let secs = (expires_at.with_timezone(&chrono::Utc)
+                                                - chrono::Utc::now())
+                                                .num_seconds();
+                                            if secs > 0 { Some(format!("{}s", secs)) } else { None }
+                                        });
+
 
                                     match set_constraints(
                                         socket_path.as_ref(),
@@ -1874,7 +1889,7 @@ fn run_app<B: Backend>(
                                                 "Failed to update runtime constraints: {}",
                                                 e
                                             ));
-                                            return Ok(());
+                                            continue;
                                         }
                                     }
                                 }
@@ -2099,7 +2114,7 @@ fn run_app<B: Backend>(
                                     Err(e) => {
                                         app.modal_error =
                                             Some(format!("Invalid lifetime format: {}", e));
-                                        return Ok(());
+                                        continue;
                                     }
                                 }
                             };
@@ -2195,7 +2210,7 @@ fn run_app<B: Backend>(
                                             Err(e) => {
                                                 app.modal_error =
                                                     Some(format!("Failed to remove timer: {}", e));
-                                                return Ok(());
+                                                continue;
                                             }
                                         }
                                     } else {
@@ -2228,7 +2243,7 @@ fn run_app<B: Backend>(
                                                             "Failed to reset timer: {}",
                                                             e
                                                         ));
-                                                        return Ok(());
+                                                        continue;
                                                     }
                                                 }
                                             }
@@ -2237,7 +2252,7 @@ fn run_app<B: Backend>(
                                                     "Invalid default lifetime: {}",
                                                     e
                                                 ));
-                                                return Ok(());
+                                                continue;
                                             }
                                         }
                                     }
@@ -2416,7 +2431,7 @@ fn run_app<B: Backend>(
                                         "Invalid bit length. Must be 2048-8192 and divisible by 8"
                                             .to_string(),
                                     );
-                                    return Ok(());
+                                    continue;
                                 }
                             }
                         } else {
@@ -3261,7 +3276,8 @@ fn render_expiration_modal(f: &mut Frame, app: &App, area: Rect) {
             if let Some(key) = app.keys.get(idx) {
                 let timer_text = if key.constraints.is_object() {
                     if key.constraints.get("lifetime").is_some() {
-                        format!("Current Timer: {} remaining", get_ttl_display(key).0)
+                        format!("Current Timer: {} remaining", get_ttl_display(key).map_or("⏳", |v| v.0))
+
                     } else {
                         "Current Timer: No expiration set".to_string()
                     }
@@ -4071,11 +4087,12 @@ fn get_loaded_icon(source: &str, loaded: bool) -> (String, Color) {
 }
 
 /// Get the protected status icon and color
-fn get_protected_icon(password_protected: bool) -> (String, Color) {
-    // let icon = "🛡".to_string();
-    let icon = "🔐".to_string();
-    let color = if password_protected { Color::Green } else { Color::Gray };
-    (icon, color)
+fn get_protected_icon(password_protected: bool) -> Option<(&'static str, Color)> {
+    if password_protected {
+        Some(("🔐", Color::Green))
+    } else {
+        None
+    }
 }
 
 /// Get confirmation/notification icon and color, or space for alignment
@@ -4126,9 +4143,9 @@ fn get_constraint_state(key: &KeyInfo) -> (bool, bool) {
 }
 
 /// Get TTL (time-to-live) display and color - returns only icon for key list
-fn get_ttl_display(key: &KeyInfo) -> (String, Color) {
+fn get_ttl_display(key: &KeyInfo) -> Option<(&'static str, Color)> {
     // Check runtime constraints for active lifetime
-    if !key.constraints.is_null() && key.constraints.as_object().unwrap().len() > 0 {
+    if !key.constraints.is_null() && key.constraints.as_object().map_or(false, |o| !o.is_empty()) {
         if let Some(lifetime_remaining) = calculate_remaining_lifetime(&key.constraints) {
             let color = if lifetime_remaining == "EXPIRED" {
                 Color::Red
@@ -4141,29 +4158,26 @@ fn get_ttl_display(key: &KeyInfo) -> (String, Color) {
             } else {
                 Color::Green // Active and counting down
             };
-            return ("⏳".to_string(), color);
+            return Some(("⏳", color));
         }
     }
 
     // Check default constraints for inactive lifetime
     if key.has_disk {
         if let Some(default_constraints) = &key.default_constraints {
-            if let Some(_default_lifetime_seconds) = default_constraints
+            if default_constraints
                 .get("default_lifetime_seconds")
                 .and_then(|v| v.as_u64())
+                .is_some()
             {
-                let constraint_color = if key.loaded {
-                    Color::Green
-                } else {
-                    Color::Gray
-                };
-                return ("⏳".to_string(), constraint_color);
+                let color = if key.loaded { Color::Green } else { Color::Gray };
+                return Some(("⏳", color));
             }
         }
     }
 
     // No TTL configured
-    ("⏳".to_string(), Color::Gray)
+    None
 }
 
 /// Format fingerprint in short format: First N chars...Last N chars
@@ -4249,11 +4263,16 @@ fn render_keys_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             spans.push(Span::raw(" "));
 
             // 2. Icon-protected
-            let (protected_icon, protected_color) = get_protected_icon(key.password_protected);
-            spans.push(Span::styled(
-                protected_icon,
-                Style::default().fg(protected_color),
-            ));
+            if let Some((protected_icon, protected_color)) = get_protected_icon(key.password_protected) {
+                spans.push(Span::styled(
+                    protected_icon,
+                    Style::default().fg(protected_color),
+                ));
+            } else {
+                spans.push(Span::raw("  ")); // 2 spaces to match 🔐 width
+            }
+
+
             spans.push(Span::raw(" "));
 
             // 3. Icon-confirmation-or-notification (get current state, considering editing)
@@ -4271,19 +4290,23 @@ fn render_keys_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
             spans.push(Span::raw(" "));
 
             // 4. Icon-ttl (time-to-live/expiration)
-            let (ttl_display, ttl_color) = if is_being_edited {
-                // Show editing lifetime if present
-                if let Some(lifetime) = &app.constraint_lifetime {
+            if is_being_edited {
+                let (ttl_str, ttl_color) = if let Some(lifetime) = &app.constraint_lifetime {
                     (format!("⏳ {}", lifetime), Color::Magenta)
                 } else {
                     ("⏳".to_string(), Color::Gray)
-                }
+                };
+                spans.push(Span::styled(ttl_str, Style::default().fg(ttl_color)));
+                spans.push(Span::raw(" "));
+            } else if let Some((ttl_display, ttl_color)) = get_ttl_display(key) {
+                spans.push(Span::styled(ttl_display, Style::default().fg(ttl_color)));
+                spans.push(Span::raw(" "));
             } else {
-                get_ttl_display(key)
-            };
+                spans.push(Span::raw("   ")); // 2 spaces for ⏳ width + 1 separator
+            }
 
-            spans.push(Span::styled(ttl_display, Style::default().fg(ttl_color)));
-            spans.push(Span::raw(" "));
+
+
 
             // 5. Short-key-fingerprint (First N chars...Last N chars format)
             let short_fingerprint = format_short_fingerprint(&key.fingerprint);
@@ -4881,11 +4904,8 @@ fn load_keys(
                 app.selected_key = None;
             }
         } else {
-            return Err(format!(
-                "Extension failed: {}",
-                String::from_utf8_lossy(&cbor_response.data)
-            )
-            .into());
+            return Err(cbor_error_msg(&cbor_response.data).into());
+
         }
     } else if response[0] == rssh_proto::messages::SSH_AGENT_FAILURE {
         // Agent is locked or operation failed
@@ -5634,11 +5654,8 @@ fn load_disk_key_with_constraints(
         let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
 
         if !cbor_response.success {
-            return Err(format!(
-                "Load failed: {}",
-                String::from_utf8_lossy(&cbor_response.data)
-            )
-            .into());
+            return Err(cbor_error_msg(&cbor_response.data).into());
+
         }
 
         Ok(())
@@ -5898,6 +5915,10 @@ fn set_key_password(
     stream.read_exact(&mut response)?;
 
     // Check response type
+    if response.is_empty() {
+        return Err("Empty response from agent".into());
+    }
+
     if response[0] == rssh_proto::messages::SSH_AGENT_SUCCESS {
         // Parse the CBOR response to check if it's actually successful
         let mut offset = 1;
@@ -5921,11 +5942,8 @@ fn set_key_password(
         let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
 
         if !cbor_response.success {
-            return Err(format!(
-                "Set password failed: {}",
-                String::from_utf8_lossy(&cbor_response.data)
-            )
-            .into());
+            return Err(cbor_error_msg(&cbor_response.data).into());
+
         }
 
         Ok(())
@@ -6034,11 +6052,8 @@ fn remove_key_password(
         let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
 
         if !cbor_response.success {
-            return Err(format!(
-                "Remove password failed: {}",
-                String::from_utf8_lossy(&cbor_response.data)
-            )
-            .into());
+            return Err(cbor_error_msg(&cbor_response.data).into());
+
         }
 
         Ok(())
@@ -6238,11 +6253,8 @@ fn set_constraints(
         let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
 
         if !cbor_response.success {
-            return Err(format!(
-                "Set constraints failed: {}",
-                String::from_utf8_lossy(&cbor_response.data)
-            )
-            .into());
+            return Err(cbor_error_msg(&cbor_response.data).into());
+
         }
 
         Ok(())
@@ -6357,11 +6369,8 @@ fn set_default_constraints(
         let cbor_response: rssh_proto::cbor::ExtensionResponse = ciborium::from_reader(cbor_data)?;
 
         if !cbor_response.success {
-            return Err(format!(
-                "Set default constraints failed: {}",
-                String::from_utf8_lossy(&cbor_response.data)
-            )
-            .into());
+            return Err(cbor_error_msg(&cbor_response.data).into());
+
         }
 
         Ok(())
@@ -6369,3 +6378,19 @@ fn set_default_constraints(
         Err("Failed to set default constraints".into())
     }
 }
+
+/// Extract a human-readable error message from a CBOR extension response payload.
+/// The payload is a CBOR-encoded JSON value of the form:
+///   {"ok": false, "error": {"code": "...", "msg": "..."}}
+fn cbor_error_msg(data: &[u8]) -> String {
+    ciborium::from_reader::<serde_json::Value, _>(data)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("msg"))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "Unknown error".to_string())
+}
+

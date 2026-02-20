@@ -11,6 +11,7 @@ TEST_DIR="${1:-/tmp/rssh-tui-test}"
 SOCKET_PATH="$TEST_DIR/agent.sock"
 STORAGE_DIR="$TEST_DIR/storage"
 TEST_PASSWORD="test_tui_pass_123"
+KEY_PASSWORD="correct_key_pass"
 
 # Test result tracking
 TESTS_RUN=0
@@ -55,20 +56,26 @@ check_expect() {
 # Create expect script for TUI automation
 create_tui_expect_script() {
     local script_path="$TEST_DIR/tui_test.exp"
+    local key_password="$KEY_PASSWORD" # Pass KEY_PASSWORD to expect script
     cat > "$script_path" << 'EOF'
 #!/usr/bin/expect -f
+
+# Enable internal debugging for expect script
+exp_internal 1
 
 set timeout 10
 set socket_path [lindex $argv 0]
 set test_name [lindex $argv 1]
+set key_password [lindex $argv 2]
 
+puts "Starting TUI for test: $test_name"
 # Start the TUI
 spawn ./target/release/rssh-agent manage --socket $socket_path
 
 # Wait for TUI to start
 expect {
-    timeout { exit 1 }
-    -re "Keys|rssh-agent|Manage" { }
+    timeout { puts "TIMEOUT: TUI did not start"; exit 1 }
+    -re "Keys|rssh-agent|Manage" { puts "TUI started: $expect_out(buffer)" }
 }
 
 # Perform test based on test_name
@@ -87,8 +94,8 @@ if {$test_name == "help"} {
     # Test help display
     send "?"        ;# Show help
     expect {
-        timeout { exit 1 }
-        -re "Help|Key|Quit" { }
+        timeout { puts "TIMEOUT: Help not displayed"; exit 1 }
+        -re "Help|Key|Quit" { puts "Help displayed: $expect_out(buffer)" }
     }
     send "q"        ;# Quit help
     sleep 0.5
@@ -102,6 +109,44 @@ if {$test_name == "refresh"} {
     send "r"        ;# Refresh
     sleep 1
     send "q"        ;# Quit
+    expect eof
+    exit 0
+}
+
+if {$test_name == "wrong_key_password"} {
+    puts "Executing wrong_key_password test"
+    # Assume the protected key is the third one (after tui-test-1, tui-test-2)
+    # Move to the third key
+    send "j"
+    sleep 0.5
+    send "j"
+    sleep 0.5
+    # Press 'L' to load the key (should open password modal)
+    send "L"
+    expect {
+        timeout { puts "TIMEOUT: Did not see password prompt"; exit 1 }
+        -re "Enter key password" { puts "Password prompt seen: $expect_out(buffer)" }
+    }
+    puts "Entering incorrect password..."
+    # Enter incorrect password
+    send "wrong_pass"
+    send "\r" ;# Enter
+    expect {
+        timeout { puts "TIMEOUT: Did not see error message after wrong password"; exit 1 }
+        -re "Failed to load key:.*password" { puts "Error message seen: $expect_out(buffer)" }
+    }
+    puts "Clearing input and entering correct password..."
+    # Clear input (backspace many times)
+    send "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b"
+    # Enter correct password
+    send "$key_password"
+    send "\r" ;# Enter
+    expect {
+        timeout { puts "TIMEOUT: Did not see success message after correct password"; exit 1 }
+        -re "Key .* loaded into memory" { puts "Success message seen: $expect_out(buffer)" }
+    }
+    puts "Key loaded successfully, quitting TUI."
+    send "q"
     expect eof
     exit 0
 }
@@ -182,6 +227,10 @@ ssh-keygen -t ed25519 -f "$TEST_DIR/tui_test_key1" -N "" -C "tui-test-1" >/dev/n
 ssh-keygen -t rsa -b 2048 -f "$TEST_DIR/tui_test_key2" -N "" -C "tui-test-2" >/dev/null 2>&1
 ssh-add "$TEST_DIR/tui_test_key1" >/dev/null 2>&1
 ssh-add "$TEST_DIR/tui_test_key2" >/dev/null 2>&1
+
+# Add a password-protected key
+ssh-keygen -t ed25519 -f "$TEST_DIR/tui_protected_key" -N "$KEY_PASSWORD" -C "tui-protected" >/dev/null 2>&1
+ssh-add "$TEST_DIR/tui_protected_key" >/dev/null 2>&1
 
 echo "=== Basic TUI Tests ==="
 
@@ -302,6 +351,13 @@ if [ "$KEY_COUNT" -gt 0 ]; then
     fi
 else
     test_result 1  # No keys to test with
+fi
+
+echo -n "Test 11: TUI incorrect key password handling... "
+if expect "$TUI_EXPECT_SCRIPT" "$SSH_AUTH_SOCK" "wrong_key_password" "$KEY_PASSWORD" >/dev/null 2>&1; then
+    test_result 0
+else
+    test_result 1
 fi
 
 echo "=== Terminal Compatibility Tests ==="

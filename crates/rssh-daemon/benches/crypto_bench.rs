@@ -1,6 +1,6 @@
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group, criterion_main};
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng as RandOsRng;
+use ssh_key::rand_core::OsRng as RandOsRng;
 use rsa::traits::{PrivateKeyParts, PublicKeyParts};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use rssh_core::config::Config;
@@ -9,6 +9,7 @@ use rssh_daemon::signing;
 use rssh_proto::wire;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use std::hint::black_box;
 
 fn benchmark_argon2_kdf(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();

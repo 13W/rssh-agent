@@ -180,27 +180,32 @@ impl Agent {
         // Get public keys for each loaded key
         let mut identities = Vec::new();
         for key_info in keys {
-            // We need to get the actual public key data
-            // For now, we'll need to decrypt and parse the key
-            match self.ram_store.with_key(&key_info.fingerprint, |key_data| {
-                use crate::key_utils;
-                key_utils::get_public_key_blob(key_data).map_err(rssh_core::Error::Internal)
-            }) {
-                Ok(public_key_blob) => {
-                    identities.push(messages::Identity {
-                        public_key: public_key_blob,
-                        comment: key_info.description,
-                    });
+            // Use cached public key if available (fast path)
+            let public_key_blob = if !key_info.public_key.is_empty() {
+                key_info.public_key
+            } else {
+                // Fallback: try to decrypt and parse the key (slow path)
+                match self.ram_store.with_key(&key_info.fingerprint, |key_data| {
+                    use crate::key_utils;
+                    key_utils::get_public_key_blob(key_data).map_err(rssh_core::Error::Internal)
+                }) {
+                    Ok(blob) => blob,
+                    Err(e) => {
+                        // Skip keys we can't process
+                        tracing::warn!(
+                            "Failed to get public key for fingerprint {}: {}",
+                            key_info.fingerprint,
+                            e
+                        );
+                        continue;
+                    }
                 }
-                Err(e) => {
-                    // Skip keys we can't process
-                    tracing::warn!(
-                        "Failed to get public key for fingerprint {}: {}",
-                        key_info.fingerprint,
-                        e
-                    );
-                }
-            }
+            };
+
+            identities.push(messages::Identity {
+                public_key: public_key_blob,
+                comment: key_info.description,
+            });
         }
 
         Ok(messages::build_identities_answer(&identities))

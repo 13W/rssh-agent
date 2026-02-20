@@ -1,9 +1,10 @@
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use rssh_core::config::Config;
 use rssh_daemon::agent::Agent;
 use rssh_proto::{messages, wire};
 use tempfile::TempDir;
 use tokio::runtime::Runtime;
+use std::hint::black_box;
 
 fn benchmark_agent_operations(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
@@ -11,7 +12,7 @@ fn benchmark_agent_operations(c: &mut Criterion) {
     c.bench_function("agent_handle_request_identities", |b| {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_123").unwrap();
-        let agent = Agent::new(config);
+        let agent = rt.block_on(Agent::new(config));
         let msg = vec![wire::MessageType::RequestIdentities as u8];
 
         b.iter(|| {
@@ -25,7 +26,7 @@ fn benchmark_agent_operations(c: &mut Criterion) {
     c.bench_function("agent_handle_lock_unlock_cycle", |b| {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_123").unwrap();
-        let agent = Agent::new(config);
+        let agent = rt.block_on(Agent::new(config));
 
         b.iter_batched(
             || {
@@ -113,7 +114,7 @@ fn benchmark_concurrent_operations(c: &mut Criterion) {
     c.bench_function("concurrent_request_identities_10", |b| {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::new_with_sentinel(temp_dir.path(), "test_password_123").unwrap();
-        let agent = std::sync::Arc::new(Agent::new(config));
+        let agent = std::sync::Arc::new(rt.block_on(Agent::new(config)));
         let msg = vec![wire::MessageType::RequestIdentities as u8];
 
         b.iter(|| {

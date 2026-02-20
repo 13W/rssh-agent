@@ -10,27 +10,6 @@ use std::sync::Arc;
 
 pub const EXTENSION_NAMESPACE: &str = "rssh-agent@local";
 
-/// Helper function to wrap a ManageOperationResponse in ExtensionResponse
-fn wrap_manage_operation_response(
-    response: rssh_proto::cbor::ManageOperationResponse,
-) -> Result<Vec<u8>> {
-    // Convert to CBOR bytes for the data field
-    let mut data_cbor = Vec::new();
-    ciborium::into_writer(&response, &mut data_cbor)
-        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
-
-    // Create the ExtensionResponse wrapper
-    let extension_response = rssh_proto::cbor::ExtensionResponse {
-        success: response.ok,
-        data: data_cbor,
-    };
-
-    let mut cbor_data = Vec::new();
-    ciborium::into_writer(&extension_response, &mut cbor_data)
-        .map_err(|e| Error::Internal(format!("CBOR encoding error: {}", e)))?;
-
-    Ok(cbor_data)
-}
 
 /// Helper function to wrap a ManageCreateResponse in ExtensionResponse
 fn wrap_manage_create_response(
@@ -75,6 +54,7 @@ fn wrap_manage_delete_response(
 
     Ok(cbor_data)
 }
+
 
 // Use the ExtensionRequest from rssh_proto::cbor
 pub use rssh_proto::cbor::ExtensionRequest;
@@ -1956,31 +1936,7 @@ pub async fn handle_manage_create(
     wrap_manage_create_response(response)
 }
 
-/// Helper function to enumerate keyfile fingerprints in a directory
-fn enumerate_keyfiles(storage_dir: &str) -> Result<Vec<String>> {
-    let mut fingerprints = Vec::new();
 
-    let entries = fs::read_dir(storage_dir)
-        .map_err(|e| Error::Internal(format!("Failed to read storage directory: {}", e)))?;
-
-    for entry in entries {
-        let entry =
-            entry.map_err(|e| Error::Internal(format!("Failed to read directory entry: {}", e)))?;
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-
-        if file_name.starts_with("sha256-")
-            && file_name.ends_with(".json")
-            && let Some(fingerprint) = file_name
-                .strip_prefix("sha256-")
-                .and_then(|s| s.strip_suffix(".json"))
-        {
-            fingerprints.push(fingerprint.to_string());
-        }
-    }
-
-    Ok(fingerprints)
-}
 /// Build an error response in CBOR format
 pub fn build_error_response(error: Error) -> Result<Vec<u8>> {
     let error_code = match error {

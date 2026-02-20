@@ -47,6 +47,7 @@ struct EncryptedKey {
     is_external: bool, // true if added via ssh-add, false if managed by rssh-agent
     created: chrono::DateTime<chrono::Utc>, // Use DateTime for serialization compatibility
     updated: Option<chrono::DateTime<chrono::Utc>>, // None for keys that haven't been updated since creation
+    public_key: Vec<u8>, // Cached public key blob for listing without decryption
 }
 
 /// Memory key for encrypting keys at rest in RAM
@@ -572,6 +573,26 @@ impl RamStore {
             .encrypt(nonce_obj, key_data)
             .map_err(|e| Error::Crypto(e.to_string()))?;
 
+        // Extract public key for caching
+        // Try to parse as wire format first (fastest and most common for external keys)
+        let public_key = match crate::keyfile::parse_wire_key_fingerprint(key_data) {
+            Ok(_) => {
+                // If it parses as wire format, we need to extract the public key blob
+                crate::wire::extract_public_key(key_data).unwrap_or_default()
+            }
+            Err(_) => {
+                // If not wire format, try OpenSSH format (for password-protected keys)
+                // Note: If it's encrypted OpenSSH format, we might not be able to get the public key
+                // without the password. In that case, we'll store an empty public key
+                // and list_keys will have to handle it (maybe show as "unknown" or fail gracefully)
+                if let Ok(ssh_key) = crate::openssh::SshPrivateKey::from_openssh(key_data, None) {
+                    ssh_key.public_key_bytes()
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+
         // Store encrypted key
         let encrypted_key = EncryptedKey {
             nonce,
@@ -586,6 +607,7 @@ impl RamStore {
             is_external,
             created: chrono::Utc::now(),
             updated: None, // No update yet since this is creation
+            public_key,
         };
 
         inner.keys.insert(fingerprint.to_string(), encrypted_key);
@@ -622,6 +644,16 @@ impl RamStore {
         let mut keys = Vec::new();
         for fp in &inner.insertion_order {
             if let Some(key) = inner.keys.get(fp) {
+                // Use cached public key if available
+                let public_key = if !key.public_key.is_empty() {
+                    key.public_key.clone()
+                } else {
+                    // Fallback for legacy keys or keys where extraction failed
+                    // We can't easily decrypt here without async/blocking issues or perf hit
+                    // For now, return empty and let caller handle it or it will show as invalid
+                    Vec::new()
+                };
+
                 keys.push(KeyInfo {
                     fingerprint: key.fingerprint.clone(),
                     description: key.description.clone(),
@@ -633,6 +665,7 @@ impl RamStore {
                     is_external: key.is_external,
                     created: key.created,
                     updated: key.updated,
+                    public_key,
                 });
             }
         }
@@ -939,7 +972,7 @@ impl RamStore {
 }
 
 /// Information about a loaded key
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct KeyInfo {
     pub fingerprint: String,
     pub description: String,
@@ -951,6 +984,7 @@ pub struct KeyInfo {
     pub is_external: bool,
     pub created: chrono::DateTime<chrono::Utc>, // Use DateTime for serialization compatibility
     pub updated: Option<chrono::DateTime<chrono::Utc>>, // None for keys that haven't been updated since creation
+    pub public_key: Vec<u8>,
 }
 
 fn derive_mem_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {
@@ -1433,3 +1467,4 @@ mod tests {
         assert!(result.is_ok(), "New key should be accessible after unlock");
     }
 }
+

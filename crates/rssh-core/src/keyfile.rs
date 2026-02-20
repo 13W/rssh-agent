@@ -617,7 +617,7 @@ pub fn validate_description(desc: &str) -> Result<()> {
 /// Parse wire format key data to extract fingerprint
 /// This is a simplified version of the key_utils::parse_wire_key function
 /// that only calculates the fingerprint without returning the full parsed data.
-fn parse_wire_key_fingerprint(key_data: &[u8]) -> Result<String> {
+pub(crate) fn parse_wire_key_fingerprint(key_data: &[u8]) -> Result<String> {
     // Basic validation - ensure reasonable length bounds for a valid key
     if key_data.len() < 8 {
         return Err(Error::Config(

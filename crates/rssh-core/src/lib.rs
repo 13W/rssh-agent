@@ -8,3 +8,4 @@ pub mod ram_store;
 pub use error::{Error, Result};
 pub mod optimized_ram_store;
 pub mod perf_cache;
+pub mod wire;

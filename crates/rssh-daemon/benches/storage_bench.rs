@@ -17,6 +17,10 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                     description: "Benchmark Ed25519 key".to_string(),
                     secret_openssh_b64: general_purpose::STANDARD.encode(&[0u8; 64]),
                     cert_openssh_b64: None,
+                    password_protected: false,
+                    default_confirm: false,
+                    default_notification: false,
+                    default_lifetime_seconds: None,
                     created: Utc::now(),
                     updated: Utc::now(),
                 };
@@ -41,6 +45,10 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                     description: "Benchmark Ed25519 key".to_string(),
                     secret_openssh_b64: general_purpose::STANDARD.encode(&[0u8; 64]),
                     cert_openssh_b64: None,
+                    password_protected: false,
+                    default_confirm: false,
+                    default_notification: false,
+                    default_lifetime_seconds: None,
                     created: Utc::now(),
                     updated: Utc::now(),
                 };
@@ -67,9 +75,14 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                     description: "Benchmark RSA 2048 key".to_string(),
                     secret_openssh_b64: general_purpose::STANDARD.encode(&[0u8; 512]), // Larger RSA key
                     cert_openssh_b64: None,
+                    password_protected: false,
+                    default_confirm: false,
+                    default_notification: false,
+                    default_lifetime_seconds: None,
                     created: Utc::now(),
                     updated: Utc::now(),
                 };
+
                 (temp_dir, fingerprint, payload)
             },
             |(temp_dir, fingerprint, payload)| {
@@ -112,9 +125,14 @@ fn benchmark_extension_operations(c: &mut Criterion) {
                 description: format!("Benchmark key {}", i),
                 secret_openssh_b64: general_purpose::STANDARD.encode(&[i as u8; 64]),
                 cert_openssh_b64: None,
+                password_protected: false,
+                default_confirm: false,
+                default_notification: false,
+                default_lifetime_seconds: None,
                 created: Utc::now(),
                 updated: Utc::now(),
             };
+
             KeyFile::write(temp_dir.path(), &fingerprint, &payload, "test_password_123").unwrap();
         }
 
@@ -172,9 +190,14 @@ fn benchmark_file_io_operations(c: &mut Criterion) {
             description: "Benchmark Ed25519 key".to_string(),
             secret_openssh_b64: general_purpose::STANDARD.encode(&[0u8; 64]),
             cert_openssh_b64: None,
+            password_protected: false,
+            default_confirm: false,
+            default_notification: false,
+            default_lifetime_seconds: None,
             created: Utc::now(),
             updated: Utc::now(),
         };
+
 
         b.iter(|| {
             let json = serde_json::to_string_pretty(&payload).unwrap();
@@ -188,9 +211,14 @@ fn benchmark_file_io_operations(c: &mut Criterion) {
             description: "Benchmark Ed25519 key".to_string(),
             secret_openssh_b64: general_purpose::STANDARD.encode(&[0u8; 64]),
             cert_openssh_b64: None,
+            password_protected: false,
+            default_confirm: false,
+            default_notification: false,
+            default_lifetime_seconds: None,
             created: Utc::now(),
             updated: Utc::now(),
         };
+
         let json = serde_json::to_string_pretty(&payload).unwrap();
 
         b.iter(|| {

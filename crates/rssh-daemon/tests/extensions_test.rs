@@ -74,10 +74,12 @@ fn test_manage_list_handler() {
         description: "Test key 1".to_string(),
         has_cert: false,
         confirm: false,
+        notification: false,
         lifetime_expires_at: None,
         is_external: false,
         created: chrono::Utc::now(),
         updated: None,
+        public_key: vec![],
     }];
 
     let result = extensions::handle_manage_list(keys, None, None);
