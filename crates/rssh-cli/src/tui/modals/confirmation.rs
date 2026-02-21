@@ -218,9 +218,9 @@ pub fn render(state: &ConfirmationState, f: &mut Frame, screen: Rect) {
                 1,
             );
             let help_text = if state.key_loaded {
-                "hjkl/Arrows: Navigate  Space: Cycle  Tab: Switch  Enter: Save  Esc: Cancel"
+                "Arrows: Navigate  Space: Cycle  Tab: Switch  Enter: Save  Esc: Cancel"
             } else {
-                "hjkl/Arrows: Navigate  Space: Cycle  Enter: Save  Esc: Cancel"
+                "Arrows: Navigate  Space: Cycle  Enter: Save  Esc: Cancel"
             };
             f.render_widget(
                 Paragraph::new(help_text)

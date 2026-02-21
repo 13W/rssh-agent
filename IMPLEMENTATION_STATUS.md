@@ -1,139 +1,105 @@
 # rssh-agent Implementation Status
 
-## ✅ Completed Features
+> Last updated: 2026-02-21. This document reflects the current state of the codebase.
+
+## Completed Features
 
 ### Core Infrastructure
-- **Workspace Structure**: Multi-crate Cargo workspace with proper separation of concerns
-- **Error Handling**: Comprehensive error types with proper exit code mapping
-- **Security Hardening**: mlockall, PR_SET_DUMPABLE, RLIMIT_CORE (with dev mode warnings)
-- **File Operations**: Atomic writes with fsync, strict permission checks (0600/0700)
 
-### Storage & Configuration
-- **Init Command**: Creates storage directory with master password protection
-- **Config Format**: JSON with Argon2id KDF and XChaCha20-Poly1305 AEAD sentinel
-- **Key Files**: SHA256 fingerprint-based naming with encrypted payloads
+- Multi-crate Cargo workspace (`rssh-types`, `rssh-core`, `rssh-proto`, `rssh-daemon`, `rssh-cli`)
+- Custom error types with structured error codes and exit code mapping
+- Security hardening: `mlockall`, `PR_SET_DUMPABLE`, `RLIMIT_CORE` (with dev mode warnings)
+- Atomic file writes with `fsync`, strict permission checks (0600/0700)
+
+### Storage and Configuration
+
+- `rssh-agent init`: creates storage directory, sets master password
+- Config format: JSON with Argon2id KDF + XChaCha20-Poly1305 AEAD sentinel
+- Key files: `sha256-<fingerprint>.json`, fingerprint embedded in encrypted payload and verified on read (prevents filename-based substitution attacks)
+- Optional per-key password protection (stored as OpenSSH encrypted format)
+- Default constraints per key: confirm, notification, lifetime
 
 ### SSH Agent Protocol
-- **Socket Management**: Unix domain socket with SO_PEERCRED UID validation
-- **Wire Protocol**: SSH agent length-prefixed framing with 1 MiB limit
-- **Message Handlers**:
-  - ✅ REQUEST_IDENTITIES - Lists loaded keys in insertion order
-  - ✅ ADD_IDENTITY - Adds Ed25519 and RSA keys
-  - ✅ ADD_ID_CONSTRAINED - Supports lifetime and confirm constraints
-  - ✅ REMOVE_IDENTITY - Removes specific key
-  - ✅ REMOVE_ALL_IDENTITIES - Clears all keys from RAM
-  - ✅ LOCK - Locks agent (zeroizes MemKey)
-  - ✅ UNLOCK - Unlocks with master password
-  - ✅ SIGN_REQUEST - Signs data with Ed25519 keys
 
-### Key Management
-- **RAM Store**: Encrypted key storage in memory with lock/unlock
-- **Key Parsing**: Handles SSH wire format for Ed25519 and RSA keys
-- **Fingerprinting**: SHA256 fingerprints matching OpenSSH format
-- **Public Key Export**: Proper SSH public key blob generation
+- Unix domain socket with `SO_PEERCRED` UID validation
+- SSH agent length-prefixed framing, 1 MiB message limit
+- `REQUEST_IDENTITIES` — lists loaded keys in insertion order
+- `ADD_IDENTITY` — adds Ed25519 and RSA keys
+- `ADD_ID_CONSTRAINED` — supports lifetime and confirm constraints
+- `REMOVE_IDENTITY` — removes specific key
+- `REMOVE_ALL_IDENTITIES` — clears all keys from RAM
+- `LOCK` — zeroizes MemKey and master password from agent state
+- `UNLOCK` — unlocks with master password
+- `SIGN_REQUEST` — signs data with Ed25519 and RSA keys
+- `session-bind@openssh.com` — parsed, returns failure (not yet implemented)
+
+### Key Management (RAM Store)
+
+- Keys kept AEAD-encrypted in RAM under ephemeral MemKey
+- MemKey derived from master password + persistent salt (Argon2id, 256 MiB)
+- Persistent salt across lock/unlock cycles ensures encrypted keys remain accessible after re-unlock
+- Private keys decrypted transiently only for signing, then zeroized
+- Anti-bruteforce: exponential backoff (1s base, 300s cap), 5-attempt lockout
+- Per-key lifetime expiry with background cleanup task and clock-skew tolerance
+- Per-key confirm and notification constraints
+- External key tracking (added via `ssh-add`) vs managed keys
+- Maximum 1024 loaded keys
+
+### Lock Security
+
+- `handle_lock()` (SSH LOCK message): zeroizes MemKey + master password
+- `lock_directly()` (SIGHUP signal): zeroizes MemKey + master password
+- Both paths use the same code path to ensure consistent behavior
 
 ### Daemon Operations
-- **Startup**: Fork to background, print SSH_AUTH_SOCK environment
-- **Shell Detection**: Auto-detects sh/csh/fish for environment export
-- **Signal Handling**: SIGTERM/SIGINT for shutdown, SIGHUP for lock
-- **Graceful Shutdown**: Cleans up socket and zeroizes secrets
 
-### Cryptographic Operations
-- **Ed25519 Signing**: Full implementation using ed25519-dalek
-- **RSA Signing**: Structure in place (needs RSA crate for full implementation)
-- **Signature Format**: Proper SSH signature blob construction
+- Fork to background, print `SSH_AUTH_SOCK` environment export
+- Shell auto-detection (sh/csh/fish) for environment export format
+- Signal handling: SIGTERM/SIGINT for graceful shutdown with secret zeroization, SIGHUP for lock
+- Systemd socket activation
 
-## 🔧 Partially Implemented
+### Custom CBOR Extensions (`rssh-agent@local`)
 
-### TUI Management Interface
-- Command structure defined
-- Socket communication ready
-- UI implementation pending
+- `manage.list` — list all keys with metadata
+- `manage.load` / `manage.unload` — RAM key management
+- `manage.import` — save an external key to disk
+- `manage.create` — generate new Ed25519 or RSA key pair
+- `manage.set_desc` — update key description
+- `manage.change_pass` — change key password
+- `manage.set_constraints` / `manage.set_default_constraints`
+- `manage.update_cert` — attach/update SSH certificate
+- `manage.delete` — delete key from disk
+- `control.shutdown` — graceful daemon stop
 
-### CBOR Extensions
-- Protocol structure defined
-- Message handling framework ready
-- Individual operations need implementation
+### Management TUI (`rssh-agent manage`)
 
-### RSA Signing
-- Key parsing complete
-- Signature algorithm selection implemented
-- Actual RSA operations need rsa crate
+The TUI is implemented in `rssh-cli` (the separate `rssh-tui` crate was merged into `rssh-cli`).
 
-## 📝 Not Implemented (from spec)
+- Master password prompt on startup
+- Three-panel layout: key list, key details / help, status bar
+- Key list with status icons (loaded/unloaded/external, password-protected, confirm, notification, expiry)
+- Detail panel: description, password, confirmation, expiration — all editable via modals
+- Delete confirmation modal
+- Create key modal (Ed25519 or RSA with configurable key size)
+- Import key modal (for external keys)
+- Inline certificate paste mode
+- Navigation: arrow keys, Tab/Shift-Tab to switch frames, `?` to toggle help/details
+- `l` locks the agent (zeroizes MemKey and master password)
 
-### Advanced Features
-- Certificate validation and management
-- Confirm prompts with 15-minute cache
-- ASKPASS integration for prompts
-- Lifetime constraints with expiration
+## Not Implemented (v0.1.0)
+
+- ECDSA key support
+- FIDO/WebAuthn (sk-*) key support
 - PKCS#11 smartcard operations
+- Confirm prompts via external ASKPASS binary (desktop notification via D-Bus is implemented)
+- Man pages and shell completions
+- `session-bind@openssh.com` full implementation
 
-### Management Extensions
-- manage.list
-- manage.load/unload
-- manage.import/export
-- manage.create
-- manage.set_desc
-- manage.change_pass
-- control.shutdown
+## Testing
 
-## 🧪 Testing Status
+- Unit tests in each crate covering core functionality
+- Integration test scripts: `test-full.sh`, `test_constraints.sh`, `test_signals.sh`, `test_certificates.sh`
+- Python extension helper: `test_extension_helper.py`
+- Master runner: `test_all_integration.sh`
 
-### ✅ Passing Tests
-- Init command with password input
-- Daemon startup and socket creation
-- Lock/unlock functionality
-- Key addition (Ed25519 and RSA)
-- Key listing with ssh-add -l
-- Ed25519 signing with ssh-keygen -Y sign
-- Remove all identities
-
-### 🔍 Test Coverage
-- Unit tests: Core components tested
-- Integration tests: SSH agent protocol verified
-- End-to-end: ssh-add and ssh-keygen integration confirmed
-
-## 📊 Metrics
-
-- **Lines of Code**: ~3000 across all crates
-- **Dependencies**: Minimal, security-focused selection
-- **Build Time**: < 30 seconds release build
-- **Binary Size**: ~5MB stripped release binary
-
-## 🚀 Ready for Production Use
-
-The following workflows are fully functional:
-
-1. **Initialize agent**: `rssh-agent init --dir ~/.ssh/rssh-agent`
-2. **Start daemon**: `eval $(rssh-agent daemon)`
-3. **Unlock agent**: `rssh-agent unlock`
-4. **Add keys**: `ssh-add ~/.ssh/id_ed25519`
-5. **List keys**: `ssh-add -l`
-6. **Use with SSH**: Keys available for authentication
-7. **Sign data**: `ssh-keygen -Y sign`
-8. **Lock agent**: `rssh-agent lock`
-9. **Stop daemon**: `rssh-agent stop`
-
-## 🔜 Next Steps for Full Compliance
-
-1. Implement remaining CBOR extension handlers
-2. Add RSA signing support (add rsa crate)
-3. Implement confirm prompts and caching
-4. Complete TUI with ratatui
-5. Add certificate management
-6. Implement lifetime constraints
-7. Add comprehensive logging
-8. Write man pages and shell completions
-
-## 🏆 Achievement Summary
-
-Successfully implemented a **working SSH agent** that:
-- ✅ Stores keys securely with encryption at rest in RAM
-- ✅ Supports Ed25519 and RSA key types
-- ✅ Works with standard SSH tools (ssh-add, ssh-keygen, ssh)
-- ✅ Implements core OpenSSH agent protocol
-- ✅ Provides security hardening and strict access controls
-- ✅ Handles lock/unlock with master password protection
-
-The implementation provides a **solid foundation** for a production-ready SSH agent with room for additional features as specified in the requirements.
+See `TESTING.md` for details.
