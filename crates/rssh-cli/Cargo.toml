@@ -16,7 +16,6 @@ rssh-types = { workspace = true }
 rssh-core = { workspace = true }
 rssh-proto = { workspace = true }
 rssh-daemon = { workspace = true }
-rssh-tui = { workspace = true, optional = true }
 clap = { workspace = true }
 clap_complete = "4.5"
 clap_mangen = "0.2"
@@ -34,6 +33,9 @@ hex = { workspace = true }
 nix = { workspace = true }
 rand = { workspace = true }
 libc = { workspace = true }
+ratatui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
@@ -42,7 +44,7 @@ tempfile = { workspace = true }
 
 [features]
 default = ["tui"]
-tui = ["dep:rssh-tui"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:chrono"]
 
 [package.metadata.deb]
 maintainer = "rssh-agent contributors <maintainer@example.com>"

@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand};
 use std::process::ExitCode;
 
 mod commands;
+#[cfg(feature = "tui")]
+mod tui;
 
 const VERSION: &str = "0.1.0";
 
