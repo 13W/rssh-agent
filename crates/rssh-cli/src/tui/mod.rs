@@ -649,7 +649,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, socket_path: Option<&String>)
         KeyCode::Char('q') | KeyCode::Char('Q') => {
             app.should_quit = true;
         }
-        KeyCode::Char('j') | KeyCode::Down => {
+        KeyCode::Down => {
             if app.active_frame == ActiveFrame::KeysList {
                 app.next();
             } else {
@@ -661,7 +661,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, socket_path: Option<&String>)
                 };
             }
         }
-        KeyCode::Char('k') | KeyCode::Up => {
+        KeyCode::Up => {
             if app.active_frame == ActiveFrame::KeysList {
                 app.previous();
             } else {
@@ -715,7 +715,7 @@ fn handle_normal_key(app: &mut App, code: KeyCode, socket_path: Option<&String>)
         KeyCode::Tab => {
             app.next_frame();
         }
-        KeyCode::Char('h') | KeyCode::Char('?') => {
+        KeyCode::Char('?') => {
             app.toggle_info_panel_content();
         }
         KeyCode::Char('r') | KeyCode::F(5) => {
@@ -1291,10 +1291,9 @@ fn render_help_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let help_text = vec![
         Line::from(vec![Span::styled("Navigation:", Style::default().add_modifier(Modifier::BOLD))]),
-        Line::from("j/Down - Move down"),
-        Line::from("k/Up   - Move up"),
+        Line::from("↓/↑    - Move down/up"),
         Line::from("Tab    - Switch frames"),
-        Line::from("h      - Toggle help/details"),
+        Line::from("?      - Toggle help/details"),
         Line::from(""),
         Line::from(vec![Span::styled("Key Management:", Style::default().add_modifier(Modifier::BOLD))]),
         Line::from("L - Load disk key"),

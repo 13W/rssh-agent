@@ -80,7 +80,7 @@ pub fn handle(state: &mut CreateKeyState, key: KeyCode) -> ModalEvent {
             ModalEvent::Confirm
         }
         KeyCode::Esc => ModalEvent::Cancel,
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if state.selected_field == 0 {
                 state.key_type_selector.prev();
                 state.update_focus();
@@ -91,7 +91,7 @@ pub fn handle(state: &mut CreateKeyState, key: KeyCode) -> ModalEvent {
             state.error = None;
             ModalEvent::None
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             if state.selected_field == 0 {
                 state.key_type_selector.next();
                 state.update_focus();

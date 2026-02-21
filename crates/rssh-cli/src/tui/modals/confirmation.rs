@@ -77,7 +77,7 @@ pub fn handle(state: &mut ConfirmationState, key: KeyCode) -> ModalEvent {
     match key {
         KeyCode::Enter => ModalEvent::Confirm,
         KeyCode::Esc => ModalEvent::Cancel,
-        KeyCode::Char(' ') | KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Char(' ') | KeyCode::Down => {
             if state.active_section == ConfirmSection::Runtime {
                 state.runtime_selector.next();
             } else {
@@ -86,7 +86,7 @@ pub fn handle(state: &mut ConfirmationState, key: KeyCode) -> ModalEvent {
             state.error = None;
             ModalEvent::None
         }
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if state.active_section == ConfirmSection::Runtime {
                 state.runtime_selector.prev();
             } else {
@@ -95,13 +95,13 @@ pub fn handle(state: &mut ConfirmationState, key: KeyCode) -> ModalEvent {
             state.error = None;
             ModalEvent::None
         }
-        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => {
+        KeyCode::Tab | KeyCode::Right => {
             if state.key_loaded {
                 state.switch_to_section(ConfirmSection::Default);
             }
             ModalEvent::None
         }
-        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => {
+        KeyCode::BackTab | KeyCode::Left => {
             if state.key_loaded {
                 state.switch_to_section(ConfirmSection::Runtime);
             }

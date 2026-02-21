@@ -84,7 +84,7 @@ pub fn handle(state: &mut ImportKeyState, key: KeyCode) -> ModalEvent {
             }
         }
         KeyCode::Esc => ModalEvent::Cancel,
-        KeyCode::Up | KeyCode::Char('k') => {
+        KeyCode::Up => {
             if state.selected_field == 1 {
                 state.password_toggle.next();
                 if !*state.password_toggle.value() {
@@ -99,7 +99,7 @@ pub fn handle(state: &mut ImportKeyState, key: KeyCode) -> ModalEvent {
             state.error = None;
             ModalEvent::None
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        KeyCode::Down => {
             if state.selected_field == 1 {
                 state.password_toggle.next();
                 if !*state.password_toggle.value() {
