@@ -114,6 +114,7 @@ impl KeyFile {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Write a key file to disk with optional key password protection and default constraints
     pub fn write_with_key_password_and_defaults<P: AsRef<Path>>(
         storage_dir: P,

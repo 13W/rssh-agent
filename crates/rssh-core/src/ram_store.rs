@@ -501,6 +501,7 @@ impl RamStore {
         self.load_key_internal(fingerprint, key_data, description, key_type, has_cert, true)
     }
 
+    #[allow(clippy::too_many_arguments)]
     /// Load a key into RAM with default constraints applied
     pub fn load_key_with_defaults(
         &self,

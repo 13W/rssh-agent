@@ -69,9 +69,7 @@ section = "net"
 priority = "optional"
 assets = [
     ["target/release/rssh-agent", "usr/bin/", "755"],
-    ["assets/rssh-setup", "usr/bin/", "755"],
-    ["assets/rssh-agent.service", "usr/lib/systemd/user/", "644"],
-    ["assets/rssh-agent.socket", "usr/lib/systemd/user/", "644"],
+    ["../../rssh-agent.service", "usr/lib/systemd/user/", "644"],
+    ["../../rssh-agent.socket", "usr/lib/systemd/user/", "644"],
 ]
-maintainer-scripts = "assets/maintainer-scripts"
 conf-files = []

@@ -68,7 +68,7 @@ pub fn handle(state: &mut CreateKeyState, key: KeyCode) -> ModalEvent {
             // Validate
             if state.is_rsa() {
                 match state.bit_length.value.parse::<u32>() {
-                    Ok(bits) if bits >= 2048 && bits <= 8192 && bits % 8 == 0 => {}
+                    Ok(bits) if (2048..=8192).contains(&bits) && bits % 8 == 0 => {}
                     _ => {
                         state.error = Some(
                             "Invalid bit length. Must be 2048-8192 and divisible by 8".to_string(),

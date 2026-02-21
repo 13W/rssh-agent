@@ -13,8 +13,8 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::{Backend, CrosstermBackend},
-    layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
@@ -72,17 +72,12 @@ enum AppMode {
 }
 
 /// Constraint option for confirmation settings
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum ConstraintOption {
+    #[default]
     None,
     Notification,
     Confirmation,
-}
-
-impl Default for ConstraintOption {
-    fn default() -> Self {
-        ConstraintOption::None
-    }
 }
 
 impl From<(bool, bool)> for ConstraintOption {
@@ -305,10 +300,8 @@ fn handle_modal_event(
                             }
                         }
                         app.close_modal();
-                    } else {
-                        if let Some(ActiveModal::Expiration(ref mut s)) = app.modal {
-                            s.error = Some("Key must be loaded to reset timer".to_string());
-                        }
+                    } else if let Some(ActiveModal::Expiration(ref mut s)) = app.modal {
+                        s.error = Some("Key must be loaded to reset timer".to_string());
                     }
                 }
             }
@@ -1453,7 +1446,7 @@ fn get_confirmation_notification_icon(confirm: bool, notification: bool) -> (Str
 }
 
 fn get_constraint_state(key: &KeyInfo) -> (bool, bool) {
-    if !key.constraints.is_null() && key.constraints.as_object().map_or(false, |o| !o.is_empty()) {
+    if !key.constraints.is_null() && key.constraints.as_object().is_some_and(|o| !o.is_empty()) {
         let confirm = key.constraints.get("confirm").and_then(|v| v.as_bool()).unwrap_or(false);
         let notification = key.constraints.get("notification").and_then(|v| v.as_bool()).unwrap_or(false);
         return (confirm, notification);
@@ -1469,7 +1462,7 @@ fn get_constraint_state(key: &KeyInfo) -> (bool, bool) {
 }
 
 fn get_ttl_display(key: &KeyInfo) -> Option<(&'static str, Color)> {
-    if !key.constraints.is_null() && key.constraints.as_object().map_or(false, |o| !o.is_empty()) {
+    if !key.constraints.is_null() && key.constraints.as_object().is_some_and(|o| !o.is_empty()) {
         if let Some(lifetime_remaining) = calculate_remaining_lifetime(&key.constraints) {
             let color = if lifetime_remaining == "EXPIRED" {
                 Color::Red
@@ -1499,11 +1492,7 @@ fn get_ttl_display(key: &KeyInfo) -> Option<(&'static str, Color)> {
 }
 
 fn format_short_fingerprint(fingerprint: &str) -> String {
-    let clean = if fingerprint.starts_with("SHA256:") {
-        &fingerprint[7..]
-    } else {
-        fingerprint
-    };
+    let clean = fingerprint.strip_prefix("SHA256:").unwrap_or(fingerprint);
     let len = clean.len();
     if len <= 20 {
         clean.to_string()

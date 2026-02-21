@@ -2,6 +2,7 @@
 //!
 //! This module provides a D-Bus-based notification system that prompts users
 //! for approval when SSH keys with confirmation constraints are used.
+#![allow(clippy::too_many_arguments)]
 
 use rssh_core::{Error, Result};
 use std::sync::{Arc, Mutex};
