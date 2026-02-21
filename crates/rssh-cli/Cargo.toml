@@ -47,6 +47,7 @@ default = ["tui"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:chrono"]
 
 [package.metadata.deb]
+name = "rssh-agent"
 maintainer = "rssh-agent contributors <maintainer@example.com>"
 copyright = "2024, rssh-agent contributors"
 license-file = ["../../LICENSE", "4"]
@@ -64,6 +65,8 @@ This package provides secure SSH authentication with enhanced key protection
 and management capabilities while maintaining full compatibility with
 existing SSH clients and workflows."""
 depends = "$auto, systemd (>= 252)"
+conflicts = "rssh-cli"
+replaces = "rssh-cli"
 suggests = "openssh-client"
 section = "net"
 priority = "optional"
