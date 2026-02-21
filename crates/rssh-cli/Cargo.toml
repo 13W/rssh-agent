@@ -12,6 +12,7 @@ name = "rssh-agent"
 path = "src/main.rs"
 
 [dependencies]
+rssh-types = { workspace = true }
 rssh-core = { workspace = true }
 rssh-proto = { workspace = true }
 rssh-daemon = { workspace = true }

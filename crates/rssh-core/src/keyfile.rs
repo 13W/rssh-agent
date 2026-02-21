@@ -84,12 +84,7 @@ pub struct KeyMetadata {
     pub updated: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum KeyType {
-    Ed25519,
-    Rsa,
-}
+pub use rssh_types::KeyType;
 
 #[derive(Zeroize, ZeroizeOnDrop)]
 struct DerivedKey([u8; 32]);

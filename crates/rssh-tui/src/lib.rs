@@ -17,23 +17,7 @@ use ratatui::{
 };
 use std::io;
 
-#[derive(Debug, Clone)]
-pub struct KeyInfo {
-    pub fingerprint: String,
-    pub key_type: String,
-    pub format: String,
-    pub description: String,
-    pub source: String, // "internal" or "external"
-    pub loaded: bool,
-    pub has_disk: bool,
-    pub has_cert: bool,
-    pub password_protected: bool, // Whether key on disk is password-protected
-    pub constraints: serde_json::Value,
-    /// Default constraints for this key (only present for disk-stored keys)
-    pub default_constraints: Option<serde_json::Value>, // Object with default_confirm and default_lifetime_seconds
-    pub created: Option<String>,
-    pub updated: Option<String>,
-}
+pub use rssh_types::ManagedKey as KeyInfo;
 
 pub struct App {
     pub keys: Vec<KeyInfo>,
@@ -582,7 +566,7 @@ impl App {
             if idx < self.keys.len() {
                 let key = &self.keys[idx];
                 self.input_mode = InputMode::DescriptionEditModal;
-                self.modal_key_fingerprint = Some(key.fingerprint.clone());
+                self.modal_key_fingerprint = Some(key.fp_sha256_hex.clone());
                 self.modal_input_buffer = key.description.clone();
                 self.modal_selected_field = 0;
                 self.modal_error = None;
@@ -601,7 +585,7 @@ impl App {
                 }
 
                 self.input_mode = InputMode::PasswordChangeModal;
-                self.modal_key_fingerprint = Some(key.fingerprint.clone());
+                self.modal_key_fingerprint = Some(key.fp_sha256_hex.clone());
                 self.modal_input_buffer.clear(); // Old password
                 self.modal_input_buffer2.clear(); // New password 
                 self.modal_input_buffer3.clear(); // Confirm password
@@ -616,7 +600,7 @@ impl App {
             if idx < self.keys.len() {
                 let key = &self.keys[idx];
                 self.input_mode = InputMode::ConfirmationSettingsModal;
-                self.modal_key_fingerprint = Some(key.fingerprint.clone());
+                self.modal_key_fingerprint = Some(key.fp_sha256_hex.clone());
                 self.modal_selected_field = 0;
                 self.modal_error = None;
 
@@ -667,7 +651,7 @@ impl App {
             if idx < self.keys.len() {
                 let key = &self.keys[idx];
                 self.input_mode = InputMode::ExpirationSettingsModal;
-                self.modal_key_fingerprint = Some(key.fingerprint.clone());
+                self.modal_key_fingerprint = Some(key.fp_sha256_hex.clone());
                 self.modal_selected_field = 0;
                 self.modal_error = None;
 
@@ -949,7 +933,7 @@ fn run_app<B: Backend>(
                                 app.input_mode = InputMode::Confirm;
                                 app.set_status(format!(
                                     "PERMANENTLY delete key {} from disk? (y/n)",
-                                    key.fingerprint
+                                    key.fp_sha256_hex
                                 ));
                             }
                         }
@@ -969,7 +953,7 @@ fn run_app<B: Backend>(
                             let has_disk = app.keys[idx].has_disk;
                             let is_loaded = app.keys[idx].loaded;
                             let password_protected = app.keys[idx].password_protected;
-                            let fingerprint = app.keys[idx].fingerprint.clone();
+                            let fingerprint = app.keys[idx].fp_sha256_hex.clone();
                             let default_constraints = app.keys[idx].default_constraints.clone();
 
                             // Check if key is on disk but not loaded
@@ -1037,7 +1021,7 @@ fn run_app<B: Backend>(
                         {
                             let key = &app.keys[idx];
                             if key.loaded {
-                                let fingerprint = key.fingerprint.clone();
+                                let fingerprint = key.fp_sha256_hex.clone();
                                 if let Err(e) = unload_key(socket_path.as_ref(), &fingerprint) {
                                     app.set_status(format!("Failed to unload key: {}", e));
                                 } else {
@@ -1068,7 +1052,7 @@ fn run_app<B: Backend>(
                                     "Key must be loaded in memory to import".to_string(),
                                 );
                             } else {
-                                app.modal_key_fingerprint = Some(key.fingerprint.clone());
+                                app.modal_key_fingerprint = Some(key.fp_sha256_hex.clone());
                                 app.import_with_password = false;
                                 app.modal_input_buffer.clear();
                                 app.modal_input_buffer2.clear();
@@ -1109,7 +1093,7 @@ fn run_app<B: Backend>(
                             } else {
                                 // Open the compact set password modal
                                 app.input_mode = InputMode::SetKeyPasswordModal;
-                                app.modal_key_fingerprint = Some(key.fingerprint.clone());
+                                app.modal_key_fingerprint = Some(key.fp_sha256_hex.clone());
                                 app.modal_input_buffer.clear(); // New password
                                 app.modal_input_buffer2.clear(); // Confirm password
                                 app.modal_selected_field = 0; // Start with new password field
@@ -1133,8 +1117,8 @@ fn run_app<B: Backend>(
                             } else {
                                 // Open password removal modal
                                 app.input_mode = InputMode::RemovePasswordModal;
-                                app.key_being_protected = Some(key.fingerprint.clone());
-                                app.modal_key_fingerprint = Some(key.fingerprint.clone());
+                                app.key_being_protected = Some(key.fp_sha256_hex.clone());
+                                app.modal_key_fingerprint = Some(key.fp_sha256_hex.clone());
                                 app.modal_input_buffer.clear(); // Clear password input buffer
                                 app.modal_error = None; // Clear any previous errors
                             }
@@ -1188,7 +1172,7 @@ fn run_app<B: Backend>(
                             } else {
                                 app.input_mode = InputMode::UpdateCertificate;
                                 app.input_buffer.clear();
-                                app.modal_key_fingerprint = Some(key.fingerprint.clone());
+                                app.modal_key_fingerprint = Some(key.fp_sha256_hex.clone());
                                 app.set_status(
                                     "Paste OpenSSH certificate (base64), then press Enter:"
                                         .to_string(),
@@ -1239,7 +1223,7 @@ fn run_app<B: Backend>(
                             let default_constraints = app
                                 .keys
                                 .iter()
-                                .find(|k| k.fingerprint == *fingerprint)
+                                .find(|k| k.fp_sha256_hex == *fingerprint)
                                 .and_then(|k| k.default_constraints.clone());
 
                             let confirm = default_constraints
@@ -1311,7 +1295,7 @@ fn run_app<B: Backend>(
                         if let Some(idx) = app.selected_key
                             && idx < app.keys.len()
                         {
-                            let fingerprint = app.keys[idx].fingerprint.clone();
+                            let fingerprint = app.keys[idx].fp_sha256_hex.clone();
                             if let Err(e) = delete_key(socket_path.as_ref(), &fingerprint) {
                                 app.set_status(format!("Failed to delete key: {}", e));
                             } else {
@@ -1335,7 +1319,7 @@ fn run_app<B: Backend>(
                         if let Some(idx) = app.selected_key
                             && idx < app.keys.len()
                         {
-                            let fingerprint = app.keys[idx].fingerprint.clone();
+                            let fingerprint = app.keys[idx].fp_sha256_hex.clone();
                             let new_description = if app.input_buffer.trim().is_empty() {
                                 None
                             } else {
@@ -1842,7 +1826,7 @@ fn run_app<B: Backend>(
                         if let Some(idx) = app.selected_key {
                             if idx < app.keys.len() {
                                 let key = &app.keys[idx];
-                                let fingerprint = key.fingerprint.clone();
+                                let fingerprint = key.fp_sha256_hex.clone();
 
                                 // Validate passwords
                                 let _old_password = if key.password_protected {
@@ -4678,7 +4662,7 @@ fn render_keys_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
             // Check if this key is currently being edited for constraints
             let is_being_edited = editing_fingerprint
-                .map(|fp| fp == key.fingerprint)
+                .map(|fp| fp == key.fp_sha256_hex)
                 .unwrap_or(false);
 
             // Build the display line according to specification:
@@ -4736,7 +4720,7 @@ fn render_keys_list(f: &mut Frame, app: &App, area: ratatui::layout::Rect) {
 
 
             // 5. Short-key-fingerprint (First N chars...Last N chars format)
-            let short_fingerprint = format_short_fingerprint(&key.fingerprint);
+            let short_fingerprint = format_short_fingerprint(&key.fp_sha256_hex);
             spans.push(Span::styled(
                 short_fingerprint,
                 Style::default()
@@ -5036,7 +5020,7 @@ fn render_key_details_panel(f: &mut Frame, app: &App, area: ratatui::layout::Rec
                     "Fingerprint: ",
                     Style::default().add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(&key.fingerprint),
+                Span::raw(&key.fp_sha256_hex),
             ]));
 
             details.push(Line::from(vec![
@@ -5280,32 +5264,13 @@ fn load_keys(
                 return Err("Server returned error in manage.list response".into());
             }
 
-            let keys_data = list_response.keys;
-
-            let mut keys: Vec<KeyInfo> = keys_data
-                .into_iter()
-                .map(|k| KeyInfo {
-                    fingerprint: k.fp_sha256_hex,
-                    key_type: k.key_type,
-                    format: k.format,
-                    description: k.description,
-                    source: k.source,
-                    loaded: k.loaded,
-                    has_disk: k.has_disk,
-                    has_cert: k.has_cert,
-                    password_protected: k.password_protected,
-                    constraints: k.constraints,
-                    default_constraints: k.default_constraints,
-                    created: k.created,
-                    updated: k.updated,
-                })
-                .collect();
+            let mut keys: Vec<KeyInfo> = list_response.keys;
 
             // Remember the currently selected key fingerprint before sorting
             let selected_fingerprint = app
                 .selected_key
                 .and_then(|idx| app.keys.get(idx))
-                .map(|key| key.fingerprint.clone());
+                .map(|key| key.fp_sha256_hex.clone());
 
             // Sort keys alphabetically by description
             keys.sort_by(|a, b| a.description.cmp(&b.description));
@@ -5318,7 +5283,7 @@ fn load_keys(
                     // Find the key with the same fingerprint after sorting
                     app.keys
                         .iter()
-                        .position(|k| k.fingerprint == fingerprint)
+                        .position(|k| k.fp_sha256_hex == fingerprint)
                         .unwrap_or(0) // Fallback to first key if fingerprint not found
                 } else {
                     0 // Default to first key if no selection

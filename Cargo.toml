@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [workspace]
 members = [
+    "crates/rssh-types",
     "crates/rssh-core",
     "crates/rssh-proto",
     "crates/rssh-daemon",
@@ -34,6 +35,7 @@ repository = "https://github.com/example/rssh-agent"
 
 [workspace.dependencies]
 # Internal crates
+rssh-types = { path = "crates/rssh-types" }
 rssh-core = { path = "crates/rssh-core" }
 rssh-proto = { path = "crates/rssh-proto" }
 rssh-daemon = { path = "crates/rssh-daemon" }
