@@ -12,8 +12,8 @@ members = [
     "crates/rssh-proto",
     "crates/rssh-daemon",
     "crates/rssh-cli",
-    "crates/rssh-tui",
 ]
+default-members = ["crates/rssh-cli"]
 resolver = "2"
 
 [package.metadata.deb]
@@ -40,7 +40,6 @@ rssh-core = { path = "crates/rssh-core" }
 rssh-proto = { path = "crates/rssh-proto" }
 rssh-daemon = { path = "crates/rssh-daemon" }
 rssh-cli = { path = "crates/rssh-cli" }
-rssh-tui = { path = "crates/rssh-tui" }
 
 # External dependencies
 tokio = { version = "1.47", features = ["full"] }

@@ -1,0 +1,2 @@
+[alias]
+deb-pkg = "deb -p rssh-cli"
