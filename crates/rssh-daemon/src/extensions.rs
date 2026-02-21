@@ -432,14 +432,7 @@ pub fn handle_session_bind(data: &[u8]) -> Result<Vec<u8>> {
         "session-bind: Successfully processed session binding (validation not yet implemented)"
     );
 
-    Ok(build_session_bind_success())
-}
-
-/// Build success response for session-bind extension
-fn build_session_bind_success() -> Vec<u8> {
-    // session-bind responses are simple SSH agent success messages
-    // No extension-specific data is required
-    vec![rssh_proto::wire::MessageType::Success as u8]
+    Ok(build_session_bind_failure("not yet implemented"))
 }
 
 /// Build failure response for session-bind extension
@@ -643,6 +636,7 @@ pub async fn handle_manage_import(
         default_confirm: false,
         default_notification: false,
         default_lifetime_seconds: None,
+        pub_key_fingerprint_sha256: String::new(), // set by write_payload
         created: now,
         updated: now,
     };
@@ -874,6 +868,7 @@ pub async fn handle_manage_import_direct(data: &[u8], master_password: &str) -> 
         default_confirm: false,
         default_notification: false,
         default_lifetime_seconds: None,
+        pub_key_fingerprint_sha256: String::new(), // set by write_payload
         created: now,
         updated: now,
     };
@@ -1860,6 +1855,7 @@ pub async fn handle_manage_create(
         default_confirm: request.confirm.unwrap_or(false),
         default_notification: request.notification.unwrap_or(false),
         default_lifetime_seconds: request.lifetime_seconds.map(|s| s as u64),
+        pub_key_fingerprint_sha256: String::new(), // set by write_payload
         created: now,
         updated: now,
     };
@@ -2224,9 +2220,9 @@ mod tests {
         // Test handler
         let response = handle_session_bind(&data).unwrap();
 
-        // Should return SSH agent success message
+        // Returns failure because session-bind is not yet implemented
         assert_eq!(response.len(), 1);
-        assert_eq!(response[0], rssh_proto::wire::MessageType::Success as u8);
+        assert_eq!(response[0], rssh_proto::wire::MessageType::Failure as u8);
     }
 
     #[test]

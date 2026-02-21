@@ -57,6 +57,9 @@ pub struct KeyPayload {
     /// Default lifetime in seconds for this key when loaded
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_lifetime_seconds: Option<u64>,
+    /// SHA-256 fingerprint of the public key, stored at write time for verification
+    #[serde(default)]
+    pub pub_key_fingerprint_sha256: String,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
 }
@@ -163,6 +166,7 @@ impl KeyFile {
             default_confirm,
             default_notification,
             default_lifetime_seconds,
+            pub_key_fingerprint_sha256: String::new(), // set by write_payload
             created: now,
             updated: now,
         };
@@ -199,8 +203,12 @@ impl KeyFile {
         // Derive key
         let key = derive_key(master_password, &salt, 256, 3, 1)?;
 
+        // Stamp fingerprint into payload before serializing so it can be verified on read
+        let mut payload = payload.clone();
+        payload.pub_key_fingerprint_sha256 = fingerprint_hex.to_string();
+
         // Serialize and encrypt payload
-        let payload_json = serde_json::to_string(payload)?;
+        let payload_json = serde_json::to_string(&payload)?;
         let cipher =
             XChaCha20Poly1305::new_from_slice(&key.0).map_err(|e| Error::Crypto(e.to_string()))?;
         let nonce = XNonce::from_slice(&nonce_bytes);
@@ -310,19 +318,16 @@ impl KeyFile {
             .decode(&payload.secret_openssh_b64)
             .map_err(|e| Error::Config(format!("Invalid base64 in secret key: {}", e)))?;
 
-        let calculated_fingerprint = if payload.password_protected {
-            // For password-protected keys, data is in OpenSSH format
-            // We need to extract the public key for fingerprint verification
-            // For now, we'll skip verification since it requires parsing the key with password
-            // In production, you might want to store the public key separately
-            fingerprint_hex.to_string() // Accept the provided fingerprint
+        let calculated_fingerprint = if !payload.pub_key_fingerprint_sha256.is_empty() {
+            // New format: fingerprint was stored at write time
+            payload.pub_key_fingerprint_sha256.clone()
         } else {
-            // For legacy keys, data is in wire format
+            // Legacy format: derive fingerprint from wire-encoded key data
             match parse_wire_key_fingerprint(&key_data) {
                 Ok(fp) => fp,
                 Err(e) => {
                     return Err(Error::Config(format!(
-                        "Failed to parse wire format key: {}",
+                        "Failed to parse key for fingerprint verification: {}",
                         e
                     )));
                 }
@@ -820,6 +825,7 @@ mod tests {
             default_confirm: false,
             default_notification: false,
             default_lifetime_seconds: None,
+            pub_key_fingerprint_sha256: String::new(),
             created: Utc::now(),
             updated: Utc::now(),
         };
@@ -913,6 +919,7 @@ mod tests {
             default_confirm: false,
             default_notification: false,
             default_lifetime_seconds: None,
+            pub_key_fingerprint_sha256: String::new(),
             created: Utc::now(),
             updated: Utc::now(),
         };

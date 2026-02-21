@@ -21,6 +21,7 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                     default_confirm: false,
                     default_notification: false,
                     default_lifetime_seconds: None,
+                    pub_key_fingerprint_sha256: String::new(),
                     created: Utc::now(),
                     updated: Utc::now(),
                 };
@@ -49,6 +50,7 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                     default_confirm: false,
                     default_notification: false,
                     default_lifetime_seconds: None,
+                    pub_key_fingerprint_sha256: String::new(),
                     created: Utc::now(),
                     updated: Utc::now(),
                 };
@@ -79,6 +81,7 @@ fn benchmark_keyfile_operations(c: &mut Criterion) {
                     default_confirm: false,
                     default_notification: false,
                     default_lifetime_seconds: None,
+                    pub_key_fingerprint_sha256: String::new(),
                     created: Utc::now(),
                     updated: Utc::now(),
                 };
@@ -129,6 +132,7 @@ fn benchmark_extension_operations(c: &mut Criterion) {
                 default_confirm: false,
                 default_notification: false,
                 default_lifetime_seconds: None,
+                pub_key_fingerprint_sha256: String::new(),
                 created: Utc::now(),
                 updated: Utc::now(),
             };
@@ -194,6 +198,7 @@ fn benchmark_file_io_operations(c: &mut Criterion) {
             default_confirm: false,
             default_notification: false,
             default_lifetime_seconds: None,
+            pub_key_fingerprint_sha256: String::new(),
             created: Utc::now(),
             updated: Utc::now(),
         };
@@ -215,6 +220,7 @@ fn benchmark_file_io_operations(c: &mut Criterion) {
             default_confirm: false,
             default_notification: false,
             default_lifetime_seconds: None,
+            pub_key_fingerprint_sha256: String::new(),
             created: Utc::now(),
             updated: Utc::now(),
         };

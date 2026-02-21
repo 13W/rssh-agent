@@ -197,16 +197,9 @@ pub async fn run_daemon(config: DaemonConfig, shell_style: Option<ShellStyle>) -
                     break;
                 }
                 _ = sighup.recv() => {
-                    tracing::info!("Received SIGHUP, locking agent for configuration reload");
-                    let lock_message = [22u8]; // SSH_AGENTC_LOCK message type
-                    match agent_for_signals.handle_message(&lock_message).await {
-                        Ok(_) => {
-                            tracing::info!("Agent locked successfully due to SIGHUP");
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to lock agent on SIGHUP: {}", e);
-                        }
-                    }
+                    tracing::info!("Received SIGHUP, locking agent");
+                    agent_for_signals.lock_directly().await;
+                    tracing::info!("Agent locked due to SIGHUP");
                 }
             }
         }

@@ -561,6 +561,24 @@ impl Agent {
         }
     }
 
+    /// Lock the agent directly (for SIGHUP and internal use): zeroizes MemKey and master password
+    pub async fn lock_directly(&self) {
+        if let Err(e) = self.ram_store.lock() {
+            tracing::error!("Failed to lock RAM store: {}", e);
+        }
+        {
+            let mut locked = self.locked.write().await;
+            *locked = true;
+        }
+        {
+            let mut master_password = self.master_password.write().await;
+            if let Some(mut password) = master_password.take() {
+                password.zeroize();
+            }
+        }
+        tracing::info!("Agent locked - MemKey zeroized, master password cleared");
+    }
+
     async fn handle_lock(&self, message: &[u8]) -> Result<Vec<u8>> {
         let _passphrase = match messages::parse_lock(message) {
             Some(pass) => pass,
@@ -573,13 +591,17 @@ impl Agent {
         // The passphrase parameter is ignored - we use master password for lock/unlock
         match self.ram_store.lock() {
             Ok(_) => {
-                // Set the agent as locked
                 {
                     let mut locked = self.locked.write().await;
                     *locked = true;
                 }
-
-                tracing::info!("Agent locked - MemKey zeroized");
+                {
+                    let mut master_password = self.master_password.write().await;
+                    if let Some(mut password) = master_password.take() {
+                        password.zeroize();
+                    }
+                }
+                tracing::info!("Agent locked - MemKey zeroized, master password cleared");
                 Ok(messages::build_success())
             }
             Err(e) => {
