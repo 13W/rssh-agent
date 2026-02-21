@@ -321,8 +321,8 @@ impl KeyFile {
         let calculated_fingerprint = if !payload.pub_key_fingerprint_sha256.is_empty() {
             // New format: fingerprint was stored at write time
             payload.pub_key_fingerprint_sha256.clone()
-        } else {
-            // Legacy format: derive fingerprint from wire-encoded key data
+        } else if !payload.password_protected {
+            // Legacy unprotected key stored in wire format — derive fingerprint from it
             match parse_wire_key_fingerprint(&key_data) {
                 Ok(fp) => fp,
                 Err(e) => {
@@ -332,6 +332,11 @@ impl KeyFile {
                     )));
                 }
             }
+        } else {
+            // Legacy password-protected key written before fingerprint storage was added.
+            // The key data is OpenSSH-encrypted and cannot be parsed without the key
+            // password, so we cannot derive the fingerprint here. Trust the filename.
+            fingerprint_hex.to_string()
         };
 
         if calculated_fingerprint != fingerprint_hex {
