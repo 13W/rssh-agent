@@ -150,15 +150,6 @@ impl Agent {
             }
         }
 
-        // // Clear the lock passphrase hash
-        // {
-        //     let mut lock_passphrase_hash = self.lock_passphrase_hash.write().await;
-        //     if let Some(mut hash) = lock_passphrase_hash.take() {
-        //         // Zeroize the hash bytes
-        //         hash.zeroize();
-        //     }
-        // }
-
         // Shutdown the RAM store (includes cleanup task shutdown and memory key zeroization)
         self.ram_store.shutdown();
         tracing::info!("RAM store shutdown completed with cleanup task termination");
@@ -1221,24 +1212,12 @@ mod tests {
         let response = agent.handle_message(&lock_msg).await.unwrap();
         assert_eq!(response, messages::build_success());
 
-        // // Verify lock passphrase hash is stored
-        // {
-        //     let lock_passphrase_hash = agent.lock_passphrase_hash.read().await;
-        //     assert!(lock_passphrase_hash.is_some());
-        //     assert_eq!(lock_passphrase_hash.as_ref().unwrap().len(), 64); // salt + hash
-        // }
-
         // Unlock with correct master password
         let mut unlock_msg = vec![wire::MessageType::Unlock as u8];
         wire::write_string(&mut unlock_msg, b"test_password_12345");
         let response = agent.handle_message(&unlock_msg).await.unwrap();
         assert_eq!(response, messages::build_success());
 
-        // // Verify lock passphrase hash is cleared after unlock
-        // {
-        //     let lock_passphrase_hash = agent.lock_passphrase_hash.read().await;
-        //     assert!(lock_passphrase_hash.is_none());
-        // }
     }
 
     #[tokio::test]

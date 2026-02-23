@@ -1,6 +1,5 @@
 /// End-to-end tests that actually parse and validate CBOR responses
 /// These tests would have caught the namespace and structure errors
-use std::fs;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::time::Duration;

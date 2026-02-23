@@ -1,6 +1,7 @@
 use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
-use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 use rssh_core::keyfile::{KeyFile, KeyPayload, KeyType};
 use rssh_daemon::extensions;
 use std::fs;

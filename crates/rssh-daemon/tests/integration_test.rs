@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, Command};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -576,89 +576,6 @@ fn read_mock_file(path: &str) -> Vec<u8> {
     })
 }
 
-fn build_unlock_request(password: &[u8]) -> Vec<u8> {
-    let mut message = vec![23]; // SSH_AGENTC_UNLOCK
-    // Add password as string
-    message.extend_from_slice(&(password.len() as u32).to_be_bytes());
-    message.extend_from_slice(password);
-
-    // Add length prefix
-    let mut request = Vec::new();
-    request.extend_from_slice(&(message.len() as u32).to_be_bytes());
-    request.extend_from_slice(&message);
-    request
-}
-
-fn parse_identities_response(response: &[u8]) -> Result<Vec<(Vec<u8>, String)>, String> {
-    if response.len() < 5 {
-        return Err("Response too short".to_string());
-    }
-
-    let msg_type = response[4];
-    if msg_type != 12 {
-        // SSH_AGENT_IDENTITIES_ANSWER
-        return Err(format!("Wrong message type: {}", msg_type));
-    }
-
-    let mut idx = 5;
-    if idx + 4 > response.len() {
-        return Err("Missing key count".to_string());
-    }
-
-    let key_count = u32::from_be_bytes([
-        response[idx],
-        response[idx + 1],
-        response[idx + 2],
-        response[idx + 3],
-    ]);
-    idx += 4;
-
-    let mut keys = Vec::new();
-    for _ in 0..key_count {
-        // Read key blob length
-        if idx + 4 > response.len() {
-            return Err("Missing key blob length".to_string());
-        }
-        let blob_len = u32::from_be_bytes([
-            response[idx],
-            response[idx + 1],
-            response[idx + 2],
-            response[idx + 3],
-        ]) as usize;
-        idx += 4;
-
-        // Read key blob
-        if idx + blob_len > response.len() {
-            return Err("Key blob truncated".to_string());
-        }
-        let blob = response[idx..idx + blob_len].to_vec();
-        idx += blob_len;
-
-        // Read comment length
-        if idx + 4 > response.len() {
-            return Err("Missing comment length".to_string());
-        }
-        let comment_len = u32::from_be_bytes([
-            response[idx],
-            response[idx + 1],
-            response[idx + 2],
-            response[idx + 3],
-        ]) as usize;
-        idx += 4;
-
-        // Read comment
-        if idx + comment_len > response.len() {
-            return Err("Comment truncated".to_string());
-        }
-        let comment = String::from_utf8_lossy(&response[idx..idx + comment_len]).to_string();
-        idx += comment_len;
-
-        keys.push((blob, comment));
-    }
-
-    Ok(keys)
-}
-
 fn build_lock_request() -> Vec<u8> {
     let mut message = vec![22]; // SSH_AGENTC_LOCK
     // Add dummy password (OpenSSH ignores it anyway)
@@ -696,20 +613,6 @@ fn build_add_identity_request() -> Vec<u8> {
     let comment = b"test-ed25519-key";
     message.extend_from_slice(&(comment.len() as u32).to_be_bytes());
     message.extend_from_slice(comment);
-
-    // Add length prefix
-    let mut request = Vec::new();
-    request.extend_from_slice(&(message.len() as u32).to_be_bytes());
-    request.extend_from_slice(&message);
-    request
-}
-
-fn build_remove_identity_request(public_key_blob: &[u8]) -> Vec<u8> {
-    let mut message = vec![18]; // SSH_AGENTC_REMOVE_IDENTITY
-
-    // Public key blob
-    message.extend_from_slice(&(public_key_blob.len() as u32).to_be_bytes());
-    message.extend_from_slice(public_key_blob);
 
     // Add length prefix
     let mut request = Vec::new();

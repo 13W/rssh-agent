@@ -1,13 +1,9 @@
-use base64::{Engine as _, engine::general_purpose};
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use ed25519_dalek::{Signer, SigningKey};
-use rand::rngs::OsRng as RandOsRng;
-use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-use rsa::{RsaPrivateKey, RsaPublicKey};
 use rssh_core::config::Config;
 use rssh_core::ram_store::RamStore;
-use rssh_daemon::signing;
 use rssh_proto::wire;
+use std::hint::black_box;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
