@@ -1,1 +1,6 @@
 target
+tmp/
+.serena
+.claude
+CLAUDE.md
+.mcp.json

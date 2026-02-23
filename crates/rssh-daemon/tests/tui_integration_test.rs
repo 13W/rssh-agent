@@ -138,7 +138,7 @@ async fn test_manage_list_response_parsing() {
 #[tokio::test]
 async fn test_manage_response_formats() {
     // Test that our mock response files can be parsed
-    let response_data = std::fs::read("../../tests/mocks/06_manage_list.response")
+    let response_data = std::fs::read("tests/mocks/06_manage_list.response")
         .expect("Should read mock response");
 
     if response_data.len() > 5 && response_data[4] == 6 {

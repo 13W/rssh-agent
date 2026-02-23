@@ -1,10 +1,3 @@
-[package]
-name = "rssh-agent"
-description = "Rust SSH-Agent"
-version = "0.1.0"
-edition = "2024"
-license = "MIT OR Apache-2.0"
-
 [workspace]
 members = [
     "crates/rssh-types",
@@ -15,15 +8,6 @@ members = [
 ]
 default-members = ["crates/rssh-cli"]
 resolver = "2"
-
-[package.metadata.deb]
-maintainer = "Volodymyr Bulyha <zero@13w.me>"
-depends = "$auto, systemd (>= 245)"
-assets = [
-    ["target/release/rssh-agent", "/usr/bin/", "755"],
-    ["rssh-agent.service", "usr/lib/systemd/user/", "644"],
-    ["rssh-agent.socket", "usr/lib/systemd/user/", "644"],
-]
 
 [workspace.package]
 version = "0.1.0"
@@ -71,9 +55,6 @@ hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
 atty = "0.2"
 libc = "0.2"
-
-[build-dependencies]
-cargo-deb = "3"
 
 [profile.release]
 lto = true

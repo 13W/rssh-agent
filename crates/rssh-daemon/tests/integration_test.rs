@@ -13,7 +13,7 @@ async fn test_list_empty_agent() {
 
     // Test with locked agent first (agent starts locked)
     // Read mock request
-    let request = read_mock_file("../../tests/mocks/01_list_empty.request");
+    let request = read_mock_file("tests/mocks/01_list_empty.request");
 
     // Send request and get response
     let response = send_request(&socket_path, &request).await;
@@ -34,7 +34,7 @@ async fn test_lock_unlock_flow() {
     let (mut daemon, socket_path, _temp_dir) = start_test_daemon().await;
 
     // Agent starts locked, try to list keys
-    let list_request = read_mock_file("../../tests/mocks/01_list_empty.request");
+    let list_request = read_mock_file("tests/mocks/01_list_empty.request");
     let response = send_request(&socket_path, &list_request).await;
     assert_eq!(response[4], 5, "Should fail when locked");
 
@@ -97,7 +97,7 @@ async fn test_remove_all_identities() {
     let (mut daemon, socket_path, _temp_dir) = start_test_daemon().await;
 
     // Read mock request
-    let request = read_mock_file("../../tests/mocks/03_remove_all.request");
+    let request = read_mock_file("tests/mocks/03_remove_all.request");
 
     // Send request and get response
     let response = send_request(&socket_path, &request).await;
@@ -117,7 +117,7 @@ async fn test_sign_request_no_key() {
     let (mut daemon, socket_path, _temp_dir) = start_test_daemon().await;
 
     // Read mock request
-    let request = read_mock_file("../../tests/mocks/04_sign_request.request");
+    let request = read_mock_file("tests/mocks/04_sign_request.request");
 
     // Send request and get response
     let response = send_request(&socket_path, &request).await;
@@ -137,9 +137,9 @@ async fn test_multiple_requests_sequential() {
 
     // Test multiple requests in sequence (agent is locked)
     let requests = vec![
-        read_mock_file("../../tests/mocks/01_list_empty.request"),
-        read_mock_file("../../tests/mocks/03_remove_all.request"),
-        read_mock_file("../../tests/mocks/01_list_empty.request"),
+        read_mock_file("tests/mocks/01_list_empty.request"),
+        read_mock_file("tests/mocks/03_remove_all.request"),
+        read_mock_file("tests/mocks/01_list_empty.request"),
     ];
 
     // All should fail with SSH_AGENT_FAILURE when locked
@@ -163,8 +163,8 @@ async fn test_concurrent_requests() {
     let socket_path_clone1 = socket_path.clone();
     let socket_path_clone2 = socket_path.clone();
 
-    let request1 = read_mock_file("../../tests/mocks/01_list_empty.request");
-    let request2 = read_mock_file("../../tests/mocks/03_remove_all.request");
+    let request1 = read_mock_file("tests/mocks/01_list_empty.request");
+    let request2 = read_mock_file("tests/mocks/03_remove_all.request");
 
     let handle1 = tokio::spawn(async move { send_request(&socket_path_clone1, &request1).await });
 
@@ -185,7 +185,7 @@ async fn test_mock_sign_request() {
     let (mut daemon, socket_path, _temp_dir) = start_test_daemon().await;
 
     // Test sign request from mocks
-    let sign_request = read_mock_file("../../tests/mocks/04_sign_request.request");
+    let sign_request = read_mock_file("tests/mocks/04_sign_request.request");
     let response = send_request(&socket_path, &sign_request).await;
 
     // Should fail because agent is locked and has no keys
@@ -199,7 +199,7 @@ async fn test_list_identities_response_format() {
     let (mut daemon, socket_path, _temp_dir) = start_test_daemon().await;
 
     // Even when locked, we should get a proper response format
-    let list_request = read_mock_file("../../tests/mocks/01_list_empty.request");
+    let list_request = read_mock_file("tests/mocks/01_list_empty.request");
     let response = send_request(&socket_path, &list_request).await;
 
     // Validate response structure
@@ -243,7 +243,7 @@ async fn test_protocol_compliance() {
     ];
 
     for (mock_file, expected_response_type) in test_messages {
-        let request = read_mock_file(&format!("../../tests/mocks/{}", mock_file));
+        let request = read_mock_file(&format!("tests/mocks/{}", mock_file));
         let response = send_request(&socket_path, &request).await;
         assert_eq!(
             response[4], expected_response_type,
@@ -294,7 +294,7 @@ async fn test_manage_list_operation() {
     let (mut daemon, socket_path, _temp_dir) = start_test_daemon().await;
 
     // Send manage.list request from mock
-    let request = read_mock_file("../../tests/mocks/06_manage_list.request");
+    let request = read_mock_file("tests/mocks/06_manage_list.request");
     let response = send_request(&socket_path, &request).await;
 
     // Agent is locked, so should return failure
@@ -308,7 +308,7 @@ async fn test_manage_add_operation() {
     let (mut daemon, socket_path, _temp_dir) = start_test_daemon().await;
 
     // Send manage.add request from mock
-    let request = read_mock_file("../../tests/mocks/07_manage_add.request");
+    let request = read_mock_file("tests/mocks/07_manage_add.request");
     let response = send_request(&socket_path, &request).await;
 
     // Agent is locked, so should return failure
@@ -322,7 +322,7 @@ async fn test_manage_remove_operation() {
     let (mut daemon, socket_path, _temp_dir) = start_test_daemon().await;
 
     // Send manage.remove request from mock
-    let request = read_mock_file("../../tests/mocks/08_manage_remove.request");
+    let request = read_mock_file("tests/mocks/08_manage_remove.request");
     let response = send_request(&socket_path, &request).await;
 
     // Agent is locked, so should return failure
@@ -392,7 +392,7 @@ async fn test_manage_cbor_edge_cases() {
     assert_eq!(response[4], 5, "Direct CBOR should fail when locked");
 
     // Test 2: Properly formatted request with namespace
-    let proper_request = read_mock_file("../../tests/mocks/06_manage_list.request");
+    let proper_request = read_mock_file("tests/mocks/06_manage_list.request");
     let response = send_request(&socket_path, &proper_request).await;
     assert_eq!(response[4], 5, "Should fail when locked");
 
