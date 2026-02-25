@@ -15,15 +15,15 @@ edition = "2024"
 rust-version = "1.89"
 authors = ["rssh-agent contributors"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/example/rssh-agent"
+repository = "https://github.com/13W/rssh-agent"
 
 [workspace.dependencies]
 # Internal crates
-rssh-types = { path = "crates/rssh-types" }
-rssh-core = { path = "crates/rssh-core" }
-rssh-proto = { path = "crates/rssh-proto" }
-rssh-daemon = { path = "crates/rssh-daemon" }
-rssh-cli = { path = "crates/rssh-cli" }
+rssh-types = { path = "crates/rssh-types", version = "0.1.0" }
+rssh-core = { path = "crates/rssh-core", version = "0.1.0" }
+rssh-proto = { path = "crates/rssh-proto", version = "0.1.0" }
+rssh-daemon = { path = "crates/rssh-daemon", version = "0.1.0" }
+rssh-cli = { path = "crates/rssh-cli", version = "0.1.0" }
 
 # External dependencies
 tokio = { version = "1.47", features = ["full"] }

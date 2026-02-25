@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Core cryptography, encrypted key storage, and RAM key management for rssh-agent"
 
 [dependencies]
 rssh-types = { workspace = true }
