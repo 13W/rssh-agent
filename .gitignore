@@ -4,3 +4,11 @@ tmp/
 .claude
 CLAUDE.md
 .mcp.json
+
+# SSH private keys — never commit
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
+*.pem
+*.key
