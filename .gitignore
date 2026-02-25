@@ -5,6 +5,9 @@ tmp/
 CLAUDE.md
 .mcp.json
 
+# Test artifacts — never commit
+test-home/
+
 # SSH private keys — never commit
 id_rsa
 id_ed25519
