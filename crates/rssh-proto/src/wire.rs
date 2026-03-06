@@ -106,25 +106,7 @@ pub fn write_message<W: Write>(writer: &mut W, data: &[u8]) -> io::Result<()> {
 
 /// Read a string from the buffer (length-prefixed)
 pub fn read_string(buf: &[u8], offset: &mut usize) -> Option<Vec<u8>> {
-    if *offset + 4 > buf.len() {
-        return None;
-    }
-
-    let len = u32::from_be_bytes([
-        buf[*offset],
-        buf[*offset + 1],
-        buf[*offset + 2],
-        buf[*offset + 3],
-    ]) as usize;
-    *offset += 4;
-
-    if *offset + len > buf.len() {
-        return None;
-    }
-
-    let data = buf[*offset..*offset + len].to_vec();
-    *offset += len;
-    Some(data)
+    rssh_core::wire::read_string(buf, offset)
 }
 
 /// Write a string to the buffer (length-prefixed)

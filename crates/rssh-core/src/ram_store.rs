@@ -25,12 +25,8 @@ const CLEANUP_BATCH_SIZE: usize = 10; // Maximum keys to cleanup per batch
 const CLOCK_SKEW_TOLERANCE_SECS: i64 = 300; // 5 minutes tolerance for clock changes
 
 /// Type alias for confirmation function to reduce complexity
-#[allow(dead_code)] // Used in with_key_confirmed function
 type ConfirmFn = Box<dyn Fn(&str, &str, &str) -> Result<bool>>;
 
-/// Type alias for notification function (info-only, no approval needed)
-#[allow(dead_code)] // Used in with_key_confirmed function  
-type NotifyFn = Box<dyn Fn(&str, &str, &str) -> Result<()>>;
 
 /// Encrypted key data stored in RAM
 #[derive(Clone)]
@@ -66,12 +62,6 @@ struct BruteforceProtection {
     last_failure: Option<Instant>,
     /// Current backoff delay in seconds
     current_delay: u64,
-    /// Maximum number of attempts before permanent lockout
-    max_attempts: u32,
-    /// Base delay for exponential backoff (seconds)
-    base_delay: u64,
-    /// Maximum delay cap (seconds)
-    max_delay: u64,
 }
 
 impl BruteforceProtection {
@@ -80,9 +70,6 @@ impl BruteforceProtection {
             attempts: 0,
             last_failure: None,
             current_delay: BASE_DELAY_SECS,
-            max_attempts: MAX_UNLOCK_ATTEMPTS,
-            base_delay: BASE_DELAY_SECS,
-            max_delay: MAX_DELAY_SECS,
         }
     }
 
@@ -99,7 +86,7 @@ impl BruteforceProtection {
 
     /// Check if permanently locked out (too many attempts)
     fn is_permanently_locked(&self) -> bool {
-        self.attempts >= self.max_attempts
+        self.attempts >= MAX_UNLOCK_ATTEMPTS
     }
 
     /// Record a failed password attempt
@@ -108,12 +95,12 @@ impl BruteforceProtection {
         self.last_failure = Some(Instant::now());
 
         // Exponential backoff: double the delay each time, capped at max
-        self.current_delay = (self.current_delay * 2).min(self.max_delay);
+        self.current_delay = (self.current_delay * 2).min(MAX_DELAY_SECS);
 
         tracing::warn!(
             "Password verification failed - attempt {}/{}, next attempt in {}s",
             self.attempts,
-            self.max_attempts,
+            MAX_UNLOCK_ATTEMPTS,
             self.current_delay
         );
     }
@@ -122,7 +109,7 @@ impl BruteforceProtection {
     fn reset(&mut self) {
         self.attempts = 0;
         self.last_failure = None;
-        self.current_delay = self.base_delay;
+        self.current_delay = BASE_DELAY_SECS;
         tracing::debug!("Bruteforce protection reset after successful unlock");
     }
 
@@ -407,7 +394,7 @@ impl RamStore {
                 "Unlock attempt blocked - rate limited for {} more seconds (attempt {}/{})",
                 remaining_secs,
                 inner.bruteforce.attempts,
-                inner.bruteforce.max_attempts
+                MAX_UNLOCK_ATTEMPTS
             );
             return Err(Error::RateLimited(remaining_secs));
         }
@@ -832,14 +819,44 @@ impl RamStore {
         result
     }
 
-    /// Decrypt a key temporarily for signing with separate confirmation and notification callbacks
-    pub fn with_key_confirmed_notify<F, R>(
-        &self,
-        fingerprint: &str,
-        f: F,
-        confirm_fn: Option<ConfirmFn>,
-        notify_fn: Option<NotifyFn>,
-    ) -> Result<R>
+
+    /// Return constraint metadata for a key without decrypting it.
+    /// Handles lifetime expiry (removes the key if expired).
+    /// The caller should perform any async confirmation *after* this call
+    /// and *before* calling `sign_with_key`, so no lock is held during I/O.
+    pub fn get_key_signing_info(&self, fingerprint: &str) -> Result<KeySigningInfo> {
+        let inner = self.inner.read().unwrap();
+
+        let _mem_key = inner.mem_key.as_ref().ok_or(Error::NeedMasterUnlock)?;
+
+        let encrypted_key = inner.keys.get(fingerprint).ok_or(Error::NotFound)?;
+
+        if let Some(expires_at) = encrypted_key.lifetime_expires_at
+            && Instant::now() >= expires_at
+        {
+            tracing::info!(
+                "Key access denied - expired: type={}, fingerprint={}",
+                encrypted_key.key_type,
+                &fingerprint[..12]
+            );
+            drop(inner);
+            self.unload_key(fingerprint)?;
+            return Err(Error::KeyExpired);
+        }
+
+        Ok(KeySigningInfo {
+            confirm: encrypted_key.confirm,
+            notification: encrypted_key.notification,
+            description: encrypted_key.description.clone(),
+            key_type: encrypted_key.key_type.clone(),
+        })
+    }
+
+    /// Decrypt a key and pass it to `f` for signing.
+    /// Does not perform confirmation — the caller must have already confirmed.
+    /// Re-checks lifetime expiry in case the key expired between the
+    /// `get_key_signing_info` call and now.
+    pub fn sign_with_key<F, R>(&self, fingerprint: &str, f: F) -> Result<R>
     where
         F: FnOnce(&[u8]) -> Result<R>,
     {
@@ -849,44 +866,19 @@ impl RamStore {
 
         let encrypted_key = inner.keys.get(fingerprint).ok_or(Error::NotFound)?;
 
-        // Check lifetime first, before cleanup
+        // Re-check expiry: the key could have expired while we were confirming.
         if let Some(expires_at) = encrypted_key.lifetime_expires_at
             && Instant::now() >= expires_at
         {
             tracing::info!(
-                "Key access denied - expired: type={}, fingerprint={}",
-                encrypted_key.key_type,
+                "Key expired between confirmation and signing: fingerprint={}",
                 &fingerprint[..12]
             );
-            // Key has expired, we should remove it
             drop(inner);
             self.unload_key(fingerprint)?;
             return Err(Error::KeyExpired);
         }
 
-        // Check constraints - confirm takes precedence over notification
-        if encrypted_key.confirm {
-            if let Some(confirm_fn) = confirm_fn {
-                let description = &encrypted_key.description;
-                let key_type = &encrypted_key.key_type;
-                if !confirm_fn(fingerprint, description, key_type)? {
-                    return Err(Error::ConfirmationDenied);
-                }
-            } else {
-                // If confirm is required but no confirm function provided, deny
-                return Err(Error::ConfirmationDenied);
-            }
-        } else if encrypted_key.notification {
-            // Only show notification if confirm is not enabled (confirm takes precedence)
-            if let Some(notify_fn) = notify_fn {
-                let description = &encrypted_key.description;
-                let key_type = &encrypted_key.key_type;
-                // For notification, use the notification callback which doesn't require approval
-                let _ = notify_fn(fingerprint, description, key_type);
-            }
-        }
-
-        // Decrypt the key
         let cipher = XChaCha20Poly1305::new_from_slice(&mem_key.key)
             .map_err(|e| Error::Crypto(e.to_string()))?;
         let nonce = XNonce::from_slice(&encrypted_key.nonce);
@@ -894,12 +886,8 @@ impl RamStore {
             .decrypt(nonce, encrypted_key.ciphertext.as_ref())
             .map_err(|e| Error::Crypto(e.to_string()))?;
 
-        // Use the key
         let result = f(&plaintext);
-
-        // Zeroize the plaintext
         plaintext.zeroize();
-
         result
     }
 
@@ -986,6 +974,17 @@ pub struct KeyInfo {
     pub created: chrono::DateTime<chrono::Utc>, // Use DateTime for serialization compatibility
     pub updated: Option<chrono::DateTime<chrono::Utc>>, // None for keys that haven't been updated since creation
     pub public_key: Vec<u8>,
+}
+
+/// Constraint and metadata snapshot for a key, used by async signing flow.
+/// Obtained quickly under a brief read lock; the async confirmation step
+/// then runs without holding any lock.
+#[derive(Debug, Clone)]
+pub struct KeySigningInfo {
+    pub confirm: bool,
+    pub notification: bool,
+    pub description: String,
+    pub key_type: String,
 }
 
 fn derive_mem_key(password: &str, salt: &[u8]) -> Result<[u8; 32]> {

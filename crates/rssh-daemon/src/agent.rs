@@ -3,7 +3,7 @@ use rssh_proto::{messages, wire};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 #[allow(dead_code)]
 const DEFAULT_MESSAGE_LIMIT: usize = 1024 * 1024; // 1 MiB
 #[allow(dead_code)]
@@ -12,9 +12,8 @@ const MANAGE_LIST_LIMIT: usize = 8 * 1024 * 1024; // 8 MiB
 /// SSH agent implementation
 pub struct Agent {
     ram_store: Arc<RamStore>,
-    locked: Arc<RwLock<bool>>,
     storage_dir: Option<String>,
-    master_password: Arc<RwLock<Option<String>>>,
+    master_password: Arc<RwLock<Option<Zeroizing<String>>>>,
     #[allow(dead_code)] // Reserved for future configuration use
     config: Arc<Config>,
     shutdown_signal: Option<Arc<tokio::sync::Notify>>,
@@ -22,36 +21,31 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// Create a new agent
-    pub async fn new(config: Config) -> Self {
+    async fn build(
+        storage_dir: Option<String>,
+        config: Config,
+        shutdown_signal: Option<Arc<tokio::sync::Notify>>,
+    ) -> Self {
         let dbus_notifications =
             Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
-
         Agent {
             ram_store: Arc::new(RamStore::new()),
-            locked: Arc::new(RwLock::new(false)), // Start unlocked - only lock when user sends LOCK command
-            storage_dir: None,
+            storage_dir,
             master_password: Arc::new(RwLock::new(None)),
             config: Arc::new(config),
-            shutdown_signal: None,
+            shutdown_signal,
             dbus_notifications,
         }
     }
 
+    /// Create a new agent
+    pub async fn new(config: Config) -> Self {
+        Self::build(None, config, None).await
+    }
+
     /// Create a new agent with storage directory
     pub async fn with_storage_dir(storage_dir: String, config: Config) -> Self {
-        let dbus_notifications =
-            Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
-
-        Agent {
-            ram_store: Arc::new(RamStore::new()),
-            locked: Arc::new(RwLock::new(false)), // Start unlocked - only lock when user sends LOCK command
-            storage_dir: Some(storage_dir),
-            master_password: Arc::new(RwLock::new(None)),
-            config: Arc::new(config),
-            shutdown_signal: None,
-            dbus_notifications,
-        }
+        Self::build(Some(storage_dir), config, None).await
     }
 
     /// Create a new agent with storage directory and shutdown signal
@@ -60,22 +54,13 @@ impl Agent {
         config: Config,
         shutdown_signal: Arc<tokio::sync::Notify>,
     ) -> Self {
-        let dbus_notifications =
-            Arc::new(crate::dbus_notifications::DbusNotificationService::new().await);
-
-        Agent {
-            ram_store: Arc::new(RamStore::new()),
-            locked: Arc::new(RwLock::new(true)), // Start locked - user must unlock with master password
-            storage_dir: Some(storage_dir),
-            master_password: Arc::new(RwLock::new(None)),
-            config: Arc::new(config),
-            shutdown_signal: Some(shutdown_signal),
-            dbus_notifications,
-        }
+        Self::build(Some(storage_dir), config, Some(shutdown_signal)).await
     }
 
     /// Set the master password for the agent
     pub async fn set_master_password(&self, master_password: String) -> Result<()> {
+        let master_password = Zeroizing::new(master_password);
+
         // Unlock the RAM store with the master password
         self.ram_store.unlock(&master_password, &self.config)?;
 
@@ -98,7 +83,7 @@ impl Agent {
         let msg_type = wire::MessageType::from_u8(message[0]);
 
         // Check if locked (only UNLOCK allowed when locked)
-        if *self.locked.read().await && msg_type != Some(wire::MessageType::Unlock) {
+        if self.ram_store.is_locked() && msg_type != Some(wire::MessageType::Unlock) {
             return Ok(messages::build_failure());
         }
 
@@ -134,12 +119,6 @@ impl Agent {
     /// Shutdown the agent gracefully, ensuring all secrets are zeroized
     pub async fn shutdown(&self) -> Result<()> {
         tracing::info!("Initiating agent shutdown");
-
-        // First lock the agent to prevent new operations
-        {
-            let mut locked = self.locked.write().await;
-            *locked = true;
-        }
 
         // Clear the master password
         {
@@ -215,172 +194,117 @@ impl Agent {
             request.flags
         );
 
-        // Calculate fingerprint from the key blob to find the key
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(&request.key_blob);
         let fingerprint = hex::encode(hasher.finalize());
-        let fingerprint_for_logging = fingerprint.clone(); // Clone for logging after closures
 
-        // Create separate confirmation and notification functions
-        let dbus_notifications = self.dbus_notifications.clone();
+        // 1. Read constraint metadata — brief read lock, no I/O.
+        let info = match self.ram_store.get_key_signing_info(&fingerprint) {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::error!("Sign request failed: {}", e);
+                return Ok(messages::build_failure());
+            }
+        };
 
-        // Confirmation function for confirm constraint (asks for approval)
-        let confirm_fn = {
-            let dbus_notifications_clone = dbus_notifications.clone();
-            Box::new(move |fp: &str, desc: &str, kt: &str| -> Result<bool> {
-                let fingerprint = fp.to_string();
-                let fingerprint_for_error = fingerprint.clone();
-                let description = desc.to_string();
-                let key_type = kt.to_string();
-                let dbus_notifications_clone = dbus_notifications_clone.clone();
+        // 2. Async confirmation — lock is NOT held during this step.
+        if info.confirm {
+            let approved = self.request_confirmation(&fingerprint, &info.description, &info.key_type).await;
+            if !approved {
+                tracing::warn!("Key confirmation denied for {}", &fingerprint[..12]);
+                return Ok(messages::build_failure());
+            }
+        }
 
-                // Use block_in_place to run async code in sync context without race conditions
-                let result = tokio::task::block_in_place(|| {
-                    // Create a new runtime handle for the async operation
-                    let handle = tokio::runtime::Handle::current();
-                    handle.block_on(async move {
-                        if dbus_notifications_clone.is_available() {
-                            tracing::debug!("Requesting D-Bus key approval for {}...", &fingerprint[..12]);
-                            match dbus_notifications_clone
-                                .request_key_approval(&fingerprint, &description, &key_type, 30)
-                                .await
-                            {
-                                Ok(approval) => {
-                                    tracing::info!(
-                                        "D-Bus key approval {} for {}",
-                                        if approval { "granted" } else { "denied" },
-                                        &fingerprint[..12]
-                                    );
-                                    Ok::<bool, rssh_core::Error>(approval)
-                                }
-                                Err(e) => {
-                                    tracing::error!("D-Bus notification failed for {}: {}", &fingerprint[..12], e);
-                                    // Try to reconnect for next time
-                                    if let Err(reconnect_err) = dbus_notifications_clone.ensure_connection().await {
-                                        tracing::warn!("Failed to reconnect D-Bus: {}", reconnect_err);
-                                    }
-                                    Ok::<bool, rssh_core::Error>(false) // Deny on error for security
-                                }
-                            }
-                        } else {
-                            tracing::debug!("D-Bus unavailable, falling back to prompt system");
-                            // Fallback to the original prompt system if D-Bus is not available
-                            match crate::prompt::PrompterDecision::choose() {
-                                Some(prompter) => {
-                                    let prompt_text = format!(
-                                        "Allow use of {} key '{}' ({}...)?\n\n[D-Bus notifications unavailable - using fallback prompt]",
-                                        key_type,
-                                        description,
-                                        &fingerprint[..12]
-                                    );
-                                    Ok::<bool, rssh_core::Error>(prompter.confirm(&prompt_text).unwrap_or(false))
-                                }
-                                None => {
-                                    tracing::warn!("No prompt method available, denying key usage for {}", &fingerprint[..12]);
-                                    Ok::<bool, rssh_core::Error>(false)
-                                }
-                            }
-                        }
-                    })
-                });
+        // 3. Decrypt and sign — brief read lock, no I/O.
+        let signature = match self.ram_store.sign_with_key(&fingerprint, |key_data| {
+            crate::signing::sign_data(key_data, &request.data, request.flags)
+                .map_err(rssh_core::Error::Internal)
+        }) {
+            Ok(sig) => sig,
+            Err(e) => {
+                tracing::error!("Sign request failed: {}", e);
+                return Ok(messages::build_failure());
+            }
+        };
 
-                match result {
-                    Ok(approval) => Ok(approval),
-                    Err(e) => {
-                        tracing::error!(
-                            "Confirmation system error for {}: {}, denying access",
-                            &fingerprint_for_error[..12],
+        tracing::info!("Signed data with key {}", &fingerprint[..12]);
+
+        // 4. Fire-and-forget notification — spawned after signing, no lock held.
+        if info.notification && !info.confirm {
+            let dbus = self.dbus_notifications.clone();
+            let fp = fingerprint.clone();
+            let desc = info.description.clone();
+            let kt = info.key_type.clone();
+            tokio::spawn(async move {
+                if dbus.is_available() {
+                    if let Err(e) = dbus.show_key_notification(&fp, &desc, &kt).await {
+                        tracing::debug!(
+                            "D-Bus info notification failed for {}: {}",
+                            &fp[..12],
                             e
                         );
-                        Ok(false)
+                    }
+                }
+            });
+        }
+
+        Ok(messages::build_sign_response(&signature))
+    }
+
+    /// Ask the user to confirm key use via D-Bus notification or terminal fallback.
+    /// Returns `true` if approved, `false` if denied or if no prompt method is available.
+    async fn request_confirmation(&self, fingerprint: &str, description: &str, key_type: &str) -> bool {
+        if self.dbus_notifications.is_available() {
+            tracing::debug!("Requesting D-Bus key approval for {}...", &fingerprint[..12]);
+            match self
+                .dbus_notifications
+                .request_key_approval(fingerprint, description, key_type, 30)
+                .await
+            {
+                Ok(approved) => {
+                    tracing::info!(
+                        "D-Bus key approval {} for {}",
+                        if approved { "granted" } else { "denied" },
+                        &fingerprint[..12]
+                    );
+                    approved
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "D-Bus notification failed for {}: {}",
+                        &fingerprint[..12],
+                        e
+                    );
+                    if let Err(reconnect_err) =
+                        self.dbus_notifications.ensure_connection().await
+                    {
+                        tracing::warn!("Failed to reconnect D-Bus: {}", reconnect_err);
+                    }
+                    false // deny on error
+                }
+            }
+        } else {
+            tracing::debug!("D-Bus unavailable, falling back to prompt system");
+            let prompt_text = format!(
+                "Allow use of {} key '{}' ({}...)?\n\n[D-Bus notifications unavailable - using fallback prompt]",
+                key_type, description, &fingerprint[..12]
+            );
+            // The terminal prompt blocks; run it off the async executor.
+            tokio::task::spawn_blocking(move || {
+                match crate::prompt::PrompterDecision::choose() {
+                    Some(prompter) => prompter.confirm(&prompt_text).unwrap_or(false),
+                    None => {
+                        tracing::warn!(
+                            "No prompt method available, denying key usage"
+                        );
+                        false
                     }
                 }
             })
-        };
-
-        // Notification function for notification constraint (info-only, no approval)
-        let notify_fn = {
-            let dbus_notifications_clone = dbus_notifications.clone();
-            Box::new(move |fp: &str, desc: &str, kt: &str| -> Result<()> {
-                let fingerprint = fp.to_string();
-                let description = desc.to_string();
-                let key_type = kt.to_string();
-                let dbus_notifications_clone = dbus_notifications_clone.clone();
-
-                // Clone fingerprint for error handling after the async move
-                let fingerprint_for_error = fingerprint.clone();
-
-                // Use block_in_place to run async code in sync context without race conditions
-                let result = tokio::task::block_in_place(|| {
-                    // Create a new runtime handle for the async operation
-                    let handle = tokio::runtime::Handle::current();
-                    handle.block_on(async move {
-                        if dbus_notifications_clone.is_available() {
-                            tracing::debug!(
-                                "Showing D-Bus info notification for {}...",
-                                &fingerprint[..12]
-                            );
-                            if let Err(e) = dbus_notifications_clone
-                                .show_key_notification(&fingerprint, &description, &key_type)
-                                .await
-                            {
-                                tracing::debug!(
-                                    "D-Bus info notification failed for {}: {}",
-                                    &fingerprint[..12],
-                                    e
-                                );
-                                // Not a critical error for info-only notifications
-                            } else {
-                                tracing::debug!(
-                                    "D-Bus info notification shown for {}",
-                                    &fingerprint[..12]
-                                );
-                            }
-                        } else {
-                            tracing::debug!(
-                                "D-Bus unavailable, no notification shown for {}",
-                                &fingerprint[..12]
-                            );
-                        }
-                        Ok::<(), rssh_core::Error>(())
-                    })
-                });
-
-                result.unwrap_or_else(|e| {
-                    tracing::debug!(
-                        "Notification system error for {}: {} (non-critical)",
-                        &fingerprint_for_error[..12],
-                        e
-                    );
-                });
-                Ok(())
-            })
-        };
-
-        // Find and sign with the key (using separate confirmation and notification callbacks)
-        match self.ram_store.with_key_confirmed_notify(
-            &fingerprint,
-            |key_data| {
-                use crate::signing;
-                signing::sign_data(key_data, &request.data, request.flags)
-                    .map_err(rssh_core::Error::Internal)
-            },
-            Some(confirm_fn),
-            Some(notify_fn),
-        ) {
-            Ok(signature) => {
-                tracing::info!("Signed data with key {}", fingerprint_for_logging);
-                Ok(messages::build_sign_response(&signature))
-            }
-            Err(rssh_core::Error::ConfirmationDenied) => {
-                tracing::warn!("Key confirmation denied for {}", fingerprint_for_logging);
-                Ok(messages::build_failure())
-            }
-            Err(e) => {
-                tracing::error!("Sign request failed: {}", e);
-                Ok(messages::build_failure())
-            }
+            .await
+            .unwrap_or(false)
         }
     }
 
@@ -558,10 +482,6 @@ impl Agent {
             tracing::error!("Failed to lock RAM store: {}", e);
         }
         {
-            let mut locked = self.locked.write().await;
-            *locked = true;
-        }
-        {
             let mut master_password = self.master_password.write().await;
             if let Some(mut password) = master_password.take() {
                 password.zeroize();
@@ -582,10 +502,6 @@ impl Agent {
         // The passphrase parameter is ignored - we use master password for lock/unlock
         match self.ram_store.lock() {
             Ok(_) => {
-                {
-                    let mut locked = self.locked.write().await;
-                    *locked = true;
-                }
                 {
                     let mut master_password = self.master_password.write().await;
                     if let Some(mut password) = master_password.take() {
@@ -614,8 +530,10 @@ impl Agent {
         );
 
         // According to spec: UNLOCK restores MemKey on correct master password
-        let master_password = String::from_utf8(passphrase)
-            .map_err(|_| rssh_core::Error::Internal("Invalid UTF-8 in unlock passphrase".into()))?;
+        let master_password = Zeroizing::new(
+            String::from_utf8(passphrase)
+                .map_err(|_| rssh_core::Error::Internal("Invalid UTF-8 in unlock passphrase".into()))?,
+        );
 
         match self.ram_store.unlock(&master_password, &self.config) {
             Ok(_) => {
@@ -623,12 +541,6 @@ impl Agent {
                 {
                     let mut master_password_guard = self.master_password.write().await;
                     *master_password_guard = Some(master_password);
-                }
-
-                // Set the agent as unlocked
-                {
-                    let mut locked = self.locked.write().await;
-                    *locked = false;
                 }
 
                 tracing::info!("Agent unlocked with correct master password");
@@ -656,6 +568,27 @@ impl Agent {
         }
     }
 
+    /// Returns the current master password, or `None` if not set.
+    async fn read_master_password(&self) -> Option<Zeroizing<String>> {
+        self.master_password.read().await.clone()
+    }
+
+    /// Converts an extension handler `Result<Vec<u8>>` into the protocol response,
+    /// logging on error and falling back to a CBOR error payload or SSH failure.
+    fn ext_dispatch(op: &str, result: rssh_core::Result<Vec<u8>>) -> Result<Vec<u8>> {
+        use crate::extensions;
+        match result {
+            Ok(cbor) => Ok(extensions::build_extension_response(cbor)),
+            Err(e) => {
+                tracing::error!("Failed to handle {}: {}", op, e);
+                match extensions::build_error_response(e) {
+                    Ok(r) => Ok(extensions::build_extension_response(r)),
+                    Err(_) => Ok(messages::build_failure()),
+                }
+            }
+        }
+    }
+
     async fn handle_extension(&self, message: &[u8]) -> Result<Vec<u8>> {
         use crate::extensions;
 
@@ -665,7 +598,6 @@ impl Agent {
             &message[..message.len().min(20)]
         );
 
-        // Parse the extension request
         let request = match extensions::parse_extension_request(message) {
             Ok(req) => req,
             Err(e) => {
@@ -674,177 +606,173 @@ impl Agent {
             }
         };
 
-        // Handle different extension operations
-        match request.extension.as_str() {
-            "session-bind@openssh.com" => {
-                tracing::debug!("Handling session-bind@openssh.com extension");
+        let data = &request.data;
+        let ext = request.extension.as_str();
+        tracing::debug!("Handling extension: {}", ext);
 
-                match extensions::handle_session_bind(&request.data) {
-                    Ok(response) => Ok(response),
-                    Err(e) => {
-                        tracing::error!("Failed to handle session-bind: {}", e);
-                        Ok(messages::build_failure())
+        // Inline helpers that borrow from self and return early on missing prereqs.
+        macro_rules! require_pwd {
+            ($op:expr) => {
+                match self.read_master_password().await {
+                    Some(p) => p,
+                    None => {
+                        tracing::error!("Master password not available for {}", $op);
+                        return Ok(messages::build_failure());
                     }
                 }
-            }
+            };
+        }
+        macro_rules! require_dir {
+            ($op:expr) => {
+                match self.storage_dir.as_deref() {
+                    Some(d) => d,
+                    None => {
+                        tracing::error!("Storage directory not available for {}", $op);
+                        return Ok(messages::build_failure());
+                    }
+                }
+            };
+        }
+
+        match ext {
+            "session-bind@openssh.com" => extensions::handle_session_bind(data).or_else(|e| {
+                tracing::error!("Failed to handle session-bind: {}", e);
+                Ok(messages::build_failure())
+            }),
+
             "manage.list" => {
-                // Get list of keys
                 let keys = match self.ram_store.list_keys() {
                     Ok(keys) => keys,
                     Err(_) => return Ok(messages::build_failure()),
                 };
-
-                // Get master password for reading disk key metadata
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                match extensions::handle_manage_list(
-                    keys,
-                    self.storage_dir.as_deref(),
-                    master_password.as_deref(),
-                ) {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.list: {}", e);
-                        return Ok(messages::build_failure());
-                    }
-                }
-            }
-            "manage.unload" => {
-                tracing::debug!("Handling manage.unload extension");
-
-                match extensions::handle_manage_unload(&request.data, &self.ram_store) {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.unload: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.delete" => {
-                tracing::debug!("Handling manage.delete extension");
-
-                match extensions::handle_manage_delete(
-                    &request.data,
-                    &self.ram_store,
-                    self.storage_dir.as_deref(),
-                ) {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.delete: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.set_desc" => {
-                tracing::debug!("Handling manage.set_desc extension");
-
-                // Get master password
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                let master_password = match master_password {
-                    Some(pwd) => pwd,
-                    None => {
-                        tracing::error!("Master password not available for manage.set_desc");
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                match extensions::handle_manage_set_desc(
-                    &request.data,
-                    &self.ram_store,
-                    self.storage_dir.as_deref(),
-                    &master_password,
-                ) {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.set_desc: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.update_cert" => {
-                tracing::debug!("Handling manage.update_cert extension");
-
-                // Get master password
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                let master_password = match master_password {
-                    Some(pwd) => pwd,
-                    None => {
-                        tracing::error!("Master password not available for manage.update_cert");
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                // Get storage directory
-                let storage_dir = match self.storage_dir.as_deref() {
-                    Some(dir) => dir,
-                    None => {
-                        tracing::error!("Storage directory not available for manage.update_cert");
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                match extensions::handle_manage_update_cert(
-                    &request.data,
-                    storage_dir,
-                    &master_password,
+                let pwd = self.read_master_password().await;
+                Self::ext_dispatch(
+                    "manage.list",
+                    extensions::handle_manage_list(
+                        keys,
+                        self.storage_dir.as_deref(),
+                        pwd.as_ref().map(|s| s.as_str()),
+                    ),
                 )
-                .await
-                {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.update_cert: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
             }
+
+            "manage.unload" => Self::ext_dispatch(
+                "manage.unload",
+                extensions::handle_manage_unload(data, &self.ram_store),
+            ),
+
+            "manage.delete" => Self::ext_dispatch(
+                "manage.delete",
+                extensions::handle_manage_delete(
+                    data,
+                    &self.ram_store,
+                    self.storage_dir.as_deref(),
+                ),
+            ),
+
+            "manage.set_constraints" => Self::ext_dispatch(
+                "manage.set_constraints",
+                extensions::handle_manage_set_constraints(data, &self.ram_store),
+            ),
+
+            "manage.set_desc" => {
+                let pwd = require_pwd!("manage.set_desc");
+                Self::ext_dispatch(
+                    "manage.set_desc",
+                    extensions::handle_manage_set_desc(
+                        data,
+                        &self.ram_store,
+                        self.storage_dir.as_deref(),
+                        &pwd,
+                    ),
+                )
+            }
+
+            "manage.set_default_constraints" => {
+                let pwd = require_pwd!("manage.set_default_constraints");
+                Self::ext_dispatch(
+                    "manage.set_default_constraints",
+                    extensions::handle_manage_set_default_constraints(
+                        data,
+                        self.storage_dir.as_deref(),
+                        &pwd,
+                    ),
+                )
+            }
+
+            "manage.create" => {
+                let pwd = require_pwd!("manage.create");
+                Self::ext_dispatch(
+                    "manage.create",
+                    extensions::handle_manage_create(
+                        data,
+                        &self.ram_store,
+                        self.storage_dir.as_deref(),
+                        &pwd,
+                    )
+                    .await,
+                )
+            }
+
+            "manage.load" => {
+                let pwd = require_pwd!("manage.load");
+                Self::ext_dispatch(
+                    "manage.load",
+                    extensions::handle_manage_load(
+                        data,
+                        &self.ram_store,
+                        self.storage_dir.as_deref(),
+                        &pwd,
+                    )
+                    .await,
+                )
+            }
+
+            "manage.update_cert" => {
+                let pwd = require_pwd!("manage.update_cert");
+                let dir = require_dir!("manage.update_cert");
+                Self::ext_dispatch(
+                    "manage.update_cert",
+                    extensions::handle_manage_update_cert(data, dir, &pwd).await,
+                )
+            }
+
+            "manage.import" => {
+                let pwd = require_pwd!("manage.import");
+                let dir = require_dir!("manage.import");
+                Self::ext_dispatch(
+                    "manage.import",
+                    extensions::handle_manage_import(data, &self.ram_store, dir, &pwd).await,
+                )
+            }
+
+            "manage.import_direct" => {
+                let pwd = require_pwd!("manage.import_direct");
+                let dir = require_dir!("manage.import_direct");
+                Self::ext_dispatch(
+                    "manage.import_direct",
+                    extensions::handle_manage_import_direct(data, dir, &pwd).await,
+                )
+            }
+
+            "manage.set_password" => {
+                let pwd = require_pwd!("manage.set_password");
+                let dir = require_dir!("manage.set_password");
+                Self::ext_dispatch(
+                    "manage.set_password",
+                    extensions::handle_manage_set_password(data, &self.ram_store, dir, &pwd).await,
+                )
+            }
+
             "control.shutdown" => {
                 tracing::info!("Received shutdown request via extension");
-
-                // Send success response first
                 match extensions::handle_control_shutdown() {
                     Ok(cbor_data) => {
-                        // Signal shutdown to the daemon if shutdown signal is available
-                        if let Some(ref shutdown_signal) = self.shutdown_signal {
-                            // Trigger the shutdown signal in a separate task to avoid blocking the response
-                            let shutdown_signal = shutdown_signal.clone();
+                        if let Some(ref signal) = self.shutdown_signal {
+                            let signal = signal.clone();
                             tokio::spawn(async move {
                                 tracing::info!("Triggering daemon shutdown via extension");
-                                shutdown_signal.notify_one();
+                                signal.notify_one();
                             });
                         } else {
                             tracing::warn!(
@@ -855,259 +783,20 @@ impl Agent {
                     }
                     Err(e) => {
                         tracing::error!("Failed to handle control.shutdown: {}", e);
-                        return Ok(messages::build_failure());
+                        Ok(messages::build_failure())
                     }
                 }
             }
-            "manage.create" => {
-                tracing::debug!("Handling manage.create extension");
 
-                // Get master password
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                let master_password = match master_password {
-                    Some(pwd) => pwd,
-                    None => {
-                        tracing::error!("Master password not available for manage.create");
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                match extensions::handle_manage_create(
-                    &request.data,
-                    &self.ram_store,
-                    self.storage_dir.as_deref(),
-                    &master_password,
-                )
-                .await
-                {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.create: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.load" => {
-                tracing::debug!("Handling manage.load extension");
-
-                // Get master password
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                let master_password = match master_password {
-                    Some(pwd) => pwd,
-                    None => {
-                        tracing::error!("Master password not available for manage.load");
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                match extensions::handle_manage_load(
-                    &request.data,
-                    &self.ram_store,
-                    self.storage_dir.as_deref(),
-                    &master_password,
-                )
-                .await
-                {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.load: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.import" => {
-                tracing::debug!("Handling manage.import extension");
-
-                // Get master password
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                let master_password = match master_password {
-                    Some(pwd) => pwd,
-                    None => {
-                        tracing::error!("Master password not available for manage.import");
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                match extensions::handle_manage_import(
-                    &request.data,
-                    &self.ram_store,
-                    &master_password,
-                )
-                .await
-                {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.import: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.import_direct" => {
-                tracing::debug!("Handling manage.import_direct extension");
-
-                // Get master password
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                let master_password = match master_password {
-                    Some(pwd) => pwd,
-                    None => {
-                        tracing::error!("Master password not available for manage.import_direct");
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                match extensions::handle_manage_import_direct(&request.data, &master_password).await
-                {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.import_direct: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.set_password" => {
-                tracing::debug!("Handling manage.set_password extension");
-
-                // Get master password
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                let master_password = match master_password {
-                    Some(pwd) => pwd,
-                    None => {
-                        tracing::error!("Master password not available for manage.set_password");
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                match extensions::handle_manage_set_password(
-                    &request.data,
-                    &self.ram_store,
-                    &master_password,
-                )
-                .await
-                {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.set_password: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.set_constraints" => {
-                tracing::debug!("Handling manage.set_constraints extension");
-
-                match extensions::handle_manage_set_constraints(&request.data, &self.ram_store) {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.set_constraints: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
-            "manage.set_default_constraints" => {
-                tracing::debug!("Handling manage.set_default_constraints extension");
-
-                // Get master password
-                let master_password = {
-                    let master_password_guard = self.master_password.read().await;
-                    master_password_guard.clone()
-                };
-
-                let master_password = match master_password {
-                    Some(pwd) => pwd,
-                    None => {
-                        tracing::error!(
-                            "Master password not available for manage.set_default_constraints"
-                        );
-                        return Ok(messages::build_failure());
-                    }
-                };
-
-                match extensions::handle_manage_set_default_constraints(
-                    &request.data,
-                    self.storage_dir.as_deref(),
-                    &master_password,
-                ) {
-                    Ok(cbor_data) => Ok(extensions::build_extension_response(cbor_data)),
-                    Err(e) => {
-                        tracing::error!("Failed to handle manage.set_default_constraints: {}", e);
-                        // Check if we should return a specific error response
-                        match extensions::build_error_response(e) {
-                            Ok(error_response) => {
-                                Ok(extensions::build_extension_response(error_response))
-                            }
-                            Err(_) => Ok(messages::build_failure()),
-                        }
-                    }
-                }
-            }
             _ => {
-                // Handle unknown extensions gracefully
-                tracing::info!("Received unknown extension: {}", request.extension);
-
-                // For unknown OpenSSH extensions, return success to maintain compatibility
-                // This prevents warnings in OpenSSH clients for extensions we don't implement
-                if request.extension.contains("@openssh.com") {
+                tracing::info!("Received unknown extension: {}", ext);
+                if ext.contains("@openssh.com") {
                     tracing::debug!(
                         "Unknown OpenSSH extension, returning success for compatibility"
                     );
                     Ok(vec![rssh_proto::wire::MessageType::Success as u8])
                 } else {
-                    tracing::warn!("Unknown extension operation: {}", request.extension);
+                    tracing::warn!("Unknown extension operation: {}", ext);
                     Ok(messages::build_failure())
                 }
             }
@@ -1138,31 +827,11 @@ mod tests {
         // Lock the RAM store initially so the test can test the lock/unlock cycle
         agent.ram_store.lock().unwrap();
 
-        // Should be unlocked initially (changed behavior - only lock when user sends LOCK command)
-        assert!(!*agent.locked.read().await);
-
-        // REQUEST_IDENTITIES should fail when RAM store is locked (even though agent is unlocked)
-        let msg = vec![wire::MessageType::RequestIdentities as u8];
-        let response = agent.handle_message(&msg).await.unwrap();
-        // Should return failure because RAM store is locked
-        assert_eq!(response, messages::build_failure());
-
-        // UNLOCK without prior LOCK should fail (no lock passphrase set)
-        let mut unlock_msg = vec![wire::MessageType::Unlock as u8];
-        wire::write_string(&mut unlock_msg, b"test_lock_password");
-        let response = agent.handle_message(&unlock_msg).await.unwrap();
-        assert_eq!(response, messages::build_failure());
-
-        // LOCK with a passphrase should work
-        let mut lock_msg = vec![wire::MessageType::Lock as u8];
-        wire::write_string(&mut lock_msg, b"test_lock_password");
-        let response = agent.handle_message(&lock_msg).await.unwrap();
-        assert_eq!(response, messages::build_success());
-
-        // Should be locked now
-        assert!(*agent.locked.read().await);
+        // After locking the RAM store manually, the agent should be locked
+        assert!(agent.ram_store.is_locked());
 
         // REQUEST_IDENTITIES should fail when locked
+        let msg = vec![wire::MessageType::RequestIdentities as u8];
         let response = agent.handle_message(&msg).await.unwrap();
         assert_eq!(response, messages::build_failure());
 
@@ -1173,7 +842,7 @@ mod tests {
         assert_eq!(response, messages::build_failure());
 
         // Should still be locked
-        assert!(*agent.locked.read().await);
+        assert!(agent.ram_store.is_locked());
 
         // UNLOCK with correct master password should work
         let mut correct_unlock_msg = vec![wire::MessageType::Unlock as u8];
@@ -1182,7 +851,16 @@ mod tests {
         assert_eq!(response, messages::build_success());
 
         // Should be unlocked now
-        assert!(!*agent.locked.read().await);
+        assert!(!agent.ram_store.is_locked());
+
+        // LOCK should work when unlocked
+        let mut lock_msg = vec![wire::MessageType::Lock as u8];
+        wire::write_string(&mut lock_msg, b"test_lock_password");
+        let response = agent.handle_message(&lock_msg).await.unwrap();
+        assert_eq!(response, messages::build_success());
+
+        // Should be locked again
+        assert!(agent.ram_store.is_locked());
     }
 
     #[tokio::test]
@@ -1194,17 +872,11 @@ mod tests {
         let config = Config::new_with_sentinel(temp.path(), "test_password_12345").unwrap();
         let agent = Agent::new(config).await;
 
-        // Set the master password so unlock operations can work
+        // Set the master password so unlock operations can work (also unlocks the RAM store)
         agent
             .set_master_password("test_password_12345".to_string())
             .await
             .unwrap();
-
-        // Set agent to unlocked state
-        {
-            let mut locked = agent.locked.write().await;
-            *locked = false;
-        }
 
         // Lock with a passphrase
         let mut lock_msg = vec![wire::MessageType::Lock as u8];
@@ -1229,24 +901,26 @@ mod tests {
         let config = Config::new_with_sentinel(temp.path(), "test_password_12345").unwrap();
         let agent = Agent::new(config).await;
 
-        // Set agent to unlocked state and lock with passphrase
-        {
-            let mut locked = agent.locked.write().await;
-            *locked = false;
-        }
+        // Unlock the agent with the master password
+        agent
+            .set_master_password("test_password_12345".to_string())
+            .await
+            .unwrap();
 
+        // Lock via SSH LOCK command (locks RAM store + clears master password)
         let mut lock_msg = vec![wire::MessageType::Lock as u8];
         wire::write_string(&mut lock_msg, b"shutdown_test_password");
-        agent.handle_message(&lock_msg).await.unwrap();
+        let lock_response = agent.handle_message(&lock_msg).await.unwrap();
+        assert_eq!(lock_response, messages::build_success());
 
         // Verify agent is locked
-        assert!(*agent.locked.read().await);
+        assert!(agent.ram_store.is_locked());
 
         // Shutdown should complete successfully and clear secrets
         agent.shutdown().await.unwrap();
 
-        // Verify agent is locked after shutdown
-        assert!(*agent.locked.read().await);
+        // Verify agent is still locked after shutdown
+        assert!(agent.ram_store.is_locked());
 
         // Verify master password is cleared
         {
@@ -1264,20 +938,9 @@ mod tests {
         let config = Config::new_with_sentinel(temp.path(), "test_password_12345").unwrap();
         let agent = Agent::new(config).await;
 
-        // Set agent to unlocked state to test removal
-        {
-            let mut locked = agent.locked.write().await;
-            *locked = false;
-        }
-
-        // The RAM store needs to be unlocked for operations to work
-        // But since we don't have the remove_all_identities test actually testing key removal,
-        // let's just test that the command succeeds when unlocked
+        // RAM store is locked (no master password set), so all commands should fail
         let msg = vec![wire::MessageType::RemoveAllIdentities as u8];
         let response = agent.handle_message(&msg).await.unwrap();
-
-        // This will fail because the RAM store is not unlocked (needs master password)
-        // But that's expected behavior - the agent lock/unlock is separate from RAM store operations
         assert_eq!(response, messages::build_failure());
     }
 }

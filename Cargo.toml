@@ -53,8 +53,9 @@ base64 = "0.22"
 sha2 = "0.10"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
-atty = "0.2"
 libc = "0.2"
+zbus = "5.0"
+tokio-stream = "0.1"
 
 [profile.release]
 lto = true

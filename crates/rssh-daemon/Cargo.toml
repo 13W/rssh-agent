@@ -18,7 +18,6 @@ tracing = { workspace = true }
 nix = { workspace = true }
 rpassword = { workspace = true }
 zeroize = { workspace = true }
-atty = { workspace = true }
 libc = { workspace = true }
 rand = { workspace = true }
 rand_core = { workspace = true }
@@ -35,8 +34,8 @@ argon2.workspace = true
 ssh-key = { workspace = true }
 parking_lot = "0.12.4"
 uuid = "1.18.1"
-zbus = "5.0"
-tokio-stream = "0.1"
+zbus = { workspace = true }
+tokio-stream = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

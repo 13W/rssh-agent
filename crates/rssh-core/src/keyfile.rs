@@ -1,5 +1,4 @@
-use crate::{Error, Result, fs_policy};
-use argon2::{Argon2, Params, Version};
+use crate::{Error, Result, fs_policy, kdf::derive_key_with_domain};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::{
@@ -10,7 +9,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const KDF_DOMAIN: &str = "rssh-agent:v1:disk";
 
@@ -88,9 +86,6 @@ pub struct KeyMetadata {
 }
 
 pub use rssh_types::KeyType;
-
-#[derive(Zeroize, ZeroizeOnDrop)]
-struct DerivedKey([u8; 32]);
 
 impl KeyFile {
     /// Write a key file to disk with optional key password protection
@@ -201,7 +196,7 @@ impl KeyFile {
         OsRng.fill_bytes(&mut nonce_bytes);
 
         // Derive key
-        let key = derive_key(master_password, &salt, 256, 3, 1)?;
+        let key = derive_key_with_domain(KDF_DOMAIN, master_password, &salt, 256, 3, 1)?;
 
         // Stamp fingerprint into payload before serializing so it can be verified on read
         let mut payload = payload.clone();
@@ -210,7 +205,7 @@ impl KeyFile {
         // Serialize and encrypt payload
         let payload_json = serde_json::to_string(&payload)?;
         let cipher =
-            XChaCha20Poly1305::new_from_slice(&key.0).map_err(|e| Error::Crypto(e.to_string()))?;
+            XChaCha20Poly1305::new_from_slice(&*key).map_err(|e| Error::Crypto(e.to_string()))?;
         let nonce = XNonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(nonce, payload_json.as_bytes())
@@ -293,7 +288,8 @@ impl KeyFile {
         }
 
         // Derive key
-        let key = derive_key(
+        let key = derive_key_with_domain(
+            KDF_DOMAIN,
             master_password,
             &salt,
             keyfile.kdf.mib,
@@ -303,7 +299,7 @@ impl KeyFile {
 
         // Decrypt
         let cipher =
-            XChaCha20Poly1305::new_from_slice(&key.0).map_err(|e| Error::Crypto(e.to_string()))?;
+            XChaCha20Poly1305::new_from_slice(&*key).map_err(|e| Error::Crypto(e.to_string()))?;
         let nonce = XNonce::from_slice(&nonce_bytes);
         let plaintext = cipher
             .decrypt(nonce, ciphertext.as_ref())
@@ -392,28 +388,9 @@ impl KeyFile {
         use ssh_key::private::{Ed25519Keypair, KeypairData, PrivateKey, RsaKeypair};
         use ssh_key::public::RsaPublicKey;
 
+        use crate::wire::read_string;
+
         let mut offset = 0;
-
-        // Helper function to read length-prefixed strings from wire format
-        let read_string = |data: &[u8], offset: &mut usize| -> Option<Vec<u8>> {
-            if data.len() < *offset + 4 {
-                return None;
-            }
-            let len = u32::from_be_bytes([
-                data[*offset],
-                data[*offset + 1],
-                data[*offset + 2],
-                data[*offset + 3],
-            ]) as usize;
-            *offset += 4;
-
-            if data.len() < *offset + len {
-                return None;
-            }
-            let result = data[*offset..*offset + len].to_vec();
-            *offset += len;
-            Some(result)
-        };
 
         // Read key type string
         let key_type_bytes = read_string(wire_data, &mut offset)
@@ -758,33 +735,6 @@ pub(crate) fn parse_wire_key_fingerprint(key_data: &[u8]) -> Result<String> {
     }
 }
 
-fn derive_key(
-    password: &str,
-    salt: &[u8],
-    memory_mib: u32,
-    iterations: u32,
-    parallelism: u32,
-) -> Result<DerivedKey> {
-    let params = Params::new(
-        memory_mib * 1024, // MiB to KiB
-        iterations,
-        parallelism,
-        Some(32),
-    )
-    .map_err(|e| Error::Crypto(e.to_string()))?;
-
-    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
-
-    let mut key = DerivedKey([0u8; 32]);
-    let mut context = Vec::from(KDF_DOMAIN.as_bytes());
-    context.extend_from_slice(salt);
-
-    argon2
-        .hash_password_into(password.as_bytes(), &context, &mut key.0)
-        .map_err(|e| Error::Crypto(e.to_string()))?;
-
-    Ok(key)
-}
 
 #[cfg(test)]
 mod tests {

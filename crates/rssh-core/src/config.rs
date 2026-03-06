@@ -1,5 +1,4 @@
-use crate::{Error, Result};
-use argon2::{Argon2, Params, Version};
+use crate::{Error, Result, kdf::derive_key_with_domain};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
@@ -7,7 +6,6 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const SENTINEL_PLAINTEXT: &[u8] = b"ok";
 const KDF_DOMAIN: &str = "rssh-agent:v1:config";
@@ -48,9 +46,6 @@ pub struct Settings {
     pub allow_rsa_sha1: bool,
 }
 
-#[derive(Zeroize, ZeroizeOnDrop)]
-struct DerivedKey([u8; 32]);
-
 impl Config {
     /// Create a new config with sentinel AEAD("ok")
     pub fn new_with_sentinel<P: AsRef<Path>>(
@@ -67,11 +62,11 @@ impl Config {
         OsRng.fill_bytes(&mut nonce_bytes);
 
         // Derive key using Argon2id
-        let key = derive_key(master_password, &salt, 256, 3, 1)?;
+        let key = derive_key_with_domain(KDF_DOMAIN, master_password, &salt, 256, 3, 1)?;
 
         // Encrypt sentinel
         let cipher =
-            XChaCha20Poly1305::new_from_slice(&key.0).map_err(|e| Error::Crypto(e.to_string()))?;
+            XChaCha20Poly1305::new_from_slice(&*key).map_err(|e| Error::Crypto(e.to_string()))?;
         let nonce = XNonce::from_slice(&nonce_bytes);
         let ciphertext = cipher
             .encrypt(nonce, SENTINEL_PLAINTEXT)
@@ -124,7 +119,8 @@ impl Config {
             return false;
         }
 
-        let Ok(key) = derive_key(
+        let Ok(key) = derive_key_with_domain(
+            KDF_DOMAIN,
             master_password,
             &salt,
             self.sentinel.kdf.mib,
@@ -134,7 +130,7 @@ impl Config {
             return false;
         };
 
-        let Ok(cipher) = XChaCha20Poly1305::new_from_slice(&key.0) else {
+        let Ok(cipher) = XChaCha20Poly1305::new_from_slice(&*key) else {
             return false;
         };
 
@@ -147,33 +143,6 @@ impl Config {
     }
 }
 
-fn derive_key(
-    password: &str,
-    salt: &[u8],
-    memory_mib: u32,
-    iterations: u32,
-    parallelism: u32,
-) -> Result<DerivedKey> {
-    let params = Params::new(
-        memory_mib * 1024, // MiB to KiB
-        iterations,
-        parallelism,
-        Some(32),
-    )
-    .map_err(|e| Error::Crypto(e.to_string()))?;
-
-    let argon2 = Argon2::new(argon2::Algorithm::Argon2id, Version::V0x13, params);
-
-    let mut key = DerivedKey([0u8; 32]);
-    let mut context = Vec::from(KDF_DOMAIN.as_bytes());
-    context.extend_from_slice(salt);
-
-    argon2
-        .hash_password_into(password.as_bytes(), &context, &mut key.0)
-        .map_err(|e| Error::Crypto(e.to_string()))?;
-
-    Ok(key)
-}
 
 #[cfg(test)]
 mod tests {

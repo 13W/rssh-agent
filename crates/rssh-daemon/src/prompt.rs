@@ -1,6 +1,6 @@
 use rssh_core::{Error, Result};
 use std::env;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::process::{Command, Stdio};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -165,7 +165,7 @@ impl PrompterDecision {
 
         if askpass_require == "never" {
             // Only use TTY
-            if atty::is(atty::Stream::Stdin) {
+            if std::io::stdin().is_terminal() {
                 return Some(Box::new(TtyPrompter));
             }
             return None;
@@ -176,7 +176,7 @@ impl PrompterDecision {
             && !askpass_prog.is_empty()
         {
             // Check conditions for using ASKPASS
-            let has_tty = atty::is(atty::Stream::Stdin);
+            let has_tty = std::io::stdin().is_terminal();
             let has_display = env::var("DISPLAY").is_ok();
 
             if askpass_require == "force" {
@@ -194,7 +194,7 @@ impl PrompterDecision {
         }
 
         // Fall back to TTY if available
-        if atty::is(atty::Stream::Stdin) {
+        if std::io::stdin().is_terminal() {
             Some(Box::new(TtyPrompter))
         } else {
             None

@@ -13,27 +13,6 @@ pub struct ParsedKey {
 pub fn parse_wire_key(key_data: &[u8]) -> Result<ParsedKey> {
     let mut offset = 0;
 
-    // Helper to read length-prefixed string
-    let read_string = |data: &[u8], offset: &mut usize| -> Option<Vec<u8>> {
-        if data.len() < *offset + 4 {
-            return None;
-        }
-        let len = u32::from_be_bytes([
-            data[*offset],
-            data[*offset + 1],
-            data[*offset + 2],
-            data[*offset + 3],
-        ]) as usize;
-        *offset += 4;
-
-        if data.len() < *offset + len {
-            return None;
-        }
-        let result = data[*offset..*offset + len].to_vec();
-        *offset += len;
-        Some(result)
-    };
-
     // Read key type
     let key_type_bytes = read_string(key_data, &mut offset)
         .ok_or_else(|| Error::Config("Failed to read key type".to_string()))?;
@@ -97,4 +76,27 @@ pub fn parse_wire_key(key_data: &[u8]) -> Result<ParsedKey> {
 /// Extract just the public key blob from wire format key data
 pub fn extract_public_key(key_data: &[u8]) -> Option<Vec<u8>> {
     parse_wire_key(key_data).ok().map(|k| k.public_key_blob)
+}
+
+/// Read a length-prefixed byte string from `buf` at `offset` (SSH wire format).
+/// The length is a 4-byte big-endian u32 followed by that many bytes.
+/// Advances `offset` past the consumed bytes and returns the data, or `None`
+/// if the buffer is too short.
+pub fn read_string(buf: &[u8], offset: &mut usize) -> Option<Vec<u8>> {
+    if *offset + 4 > buf.len() {
+        return None;
+    }
+    let len = u32::from_be_bytes([
+        buf[*offset],
+        buf[*offset + 1],
+        buf[*offset + 2],
+        buf[*offset + 3],
+    ]) as usize;
+    *offset += 4;
+    if *offset + len > buf.len() {
+        return None;
+    }
+    let data = buf[*offset..*offset + len].to_vec();
+    *offset += len;
+    Some(data)
 }
